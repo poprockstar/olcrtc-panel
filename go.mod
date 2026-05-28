@@ -3,7 +3,7 @@ module olcpanel
 go 1.25.0
 
 require (
-	golang.org/x/crypto v0.41.0
+	golang.org/x/crypto v0.52.0
 	modernc.org/sqlite v1.50.1
 )
 
