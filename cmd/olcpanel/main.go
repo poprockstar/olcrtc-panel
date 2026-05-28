@@ -14,6 +14,7 @@ import (
 
 	"olcpanel/internal/config"
 	"olcpanel/internal/server"
+	"olcpanel/internal/storage"
 	"olcpanel/internal/webui"
 )
 
@@ -32,6 +33,8 @@ func run(args []string) error {
 	switch args[0] {
 	case "serve":
 		return serve(args[1:])
+	case "migrate":
+		return migrate(args[1:])
 	case "-h", "--help", "help":
 		return usage()
 	default:
@@ -43,21 +46,35 @@ func serve(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	bind := flags.String("bind", "", "HTTP bind address")
+	databaseURL := flags.String("database-url", "", "database URL")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadWithOptions(config.LoadOptions{
+		BindAddress: *bind,
+		DatabaseURL: *databaseURL,
+	})
 	if err != nil {
 		return err
 	}
-	if *bind != "" {
-		cfg.BindAddress = *bind
+
+	ctx := context.Background()
+	db, err := storage.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := storage.Migrate(ctx, db); err != nil {
+		return err
 	}
 
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddress,
-		Handler:           server.New(cfg, webui.Assets()),
+		Handler:           server.New(cfg, webui.Assets(), server.WithDatabase(db)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -84,6 +101,32 @@ func serve(args []string) error {
 	}
 }
 
+func migrate(args []string) error {
+	flags := flag.NewFlagSet("migrate", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databaseURL := flags.String("database-url", "", "database URL")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+
+	cfg, err := config.LoadWithOptions(config.LoadOptions{DatabaseURL: *databaseURL})
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	db, err := storage.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	return storage.Migrate(ctx, db)
+}
+
 func usage() error {
 	fmt.Fprint(os.Stderr, commandUsage())
 	return nil
@@ -93,9 +136,11 @@ func commandUsage() string {
 	return `olcpanel manages a local OlcRTC VPS panel.
 
 Usage:
-  olcpanel serve [--bind 127.0.0.1:8888]
+  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db]
+  olcpanel migrate [--database-url sqlite:///etc/olcpanel/panel.db]
 
 Environment:
-  OLCPANEL_BIND  HTTP bind address. Defaults to 127.0.0.1:8888.
+  OLCPANEL_BIND          HTTP bind address. Defaults to 127.0.0.1:8888.
+  OLCPANEL_DATABASE_URL  Database URL. Defaults to sqlite:///etc/olcpanel/panel.db.
 `
 }

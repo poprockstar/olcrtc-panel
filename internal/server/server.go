@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"io/fs"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"olcpanel/internal/config"
+	"olcpanel/internal/storage"
 )
 
 type StateResponse struct {
@@ -18,7 +20,24 @@ type StateResponse struct {
 	BindAddress   string `json:"bind_address"`
 }
 
-func New(cfg config.Config, assets fs.FS) http.Handler {
+type Option func(*dependencies)
+
+type dependencies struct {
+	db *sql.DB
+}
+
+func WithDatabase(db *sql.DB) Option {
+	return func(deps *dependencies) {
+		deps.db = db
+	}
+}
+
+func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
+	deps := dependencies{}
+	for _, option := range options {
+		option(&deps)
+	}
+
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/v1/state", func(w http.ResponseWriter, r *http.Request) {
@@ -29,6 +48,46 @@ func New(cfg config.Config, assets fs.FS) http.Handler {
 			SetupRequired: true,
 			BindAddress:   cfg.BindAddress,
 		})
+	})
+
+	mux.HandleFunc("GET /api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		if deps.db == nil {
+			http.Error(w, "database is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		settings, err := storage.GetSettings(r.Context(), deps.db)
+		if err != nil {
+			http.Error(w, "failed to read settings", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, settings)
+	})
+
+	mux.HandleFunc("PUT /api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
+		if deps.db == nil {
+			http.Error(w, "database is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+
+		var settings storage.Settings
+		decoder := json.NewDecoder(r.Body)
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&settings); err != nil {
+			http.Error(w, "invalid settings JSON", http.StatusBadRequest)
+			return
+		}
+		if err := storage.ValidateSettings(settings); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := storage.PutSettings(r.Context(), deps.db, settings); err != nil {
+			http.Error(w, "failed to persist settings", http.StatusInternalServerError)
+			return
+		}
+
+		writeJSON(w, settings)
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -57,4 +116,9 @@ func New(cfg config.Config, assets fs.FS) http.Handler {
 	})
 
 	return mux
+}
+
+func writeJSON(w http.ResponseWriter, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(value)
 }

@@ -1,0 +1,97 @@
+CREATE TABLE IF NOT EXISTS nodes (
+	id TEXT PRIMARY KEY,
+	name TEXT NOT NULL,
+	kind TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS users (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	username TEXT NOT NULL UNIQUE,
+	password_hash TEXT NOT NULL,
+	role TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+	id TEXT PRIMARY KEY,
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	expires_at TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	name TEXT NOT NULL,
+	token_hash TEXT NOT NULL UNIQUE,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	last_used_at TEXT,
+	revoked_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS clients (
+	id TEXT PRIMARY KEY,
+	node_id TEXT NOT NULL REFERENCES nodes(id),
+	name TEXT NOT NULL,
+	status TEXT NOT NULL DEFAULT 'active',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS locations (
+	id TEXT PRIMARY KEY,
+	node_id TEXT NOT NULL REFERENCES nodes(id),
+	client_id TEXT REFERENCES clients(id) ON DELETE SET NULL,
+	name TEXT NOT NULL,
+	endpoint TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL DEFAULT 'inactive',
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS traffic_counters (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	node_id TEXT NOT NULL REFERENCES nodes(id),
+	client_id TEXT REFERENCES clients(id) ON DELETE SET NULL,
+	location_id TEXT REFERENCES locations(id) ON DELETE SET NULL,
+	rx_bytes INTEGER NOT NULL DEFAULT 0,
+	tx_bytes INTEGER NOT NULL DEFAULT 0,
+	period_start TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL,
+	updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS backups (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	node_id TEXT NOT NULL REFERENCES nodes(id),
+	path TEXT NOT NULL,
+	status TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS integration_mappings (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	node_id TEXT NOT NULL REFERENCES nodes(id),
+	integration TEXT NOT NULL,
+	external_id TEXT NOT NULL,
+	local_type TEXT NOT NULL,
+	local_id TEXT NOT NULL,
+	created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	UNIQUE(integration, external_id, local_type)
+);
+
+INSERT OR IGNORE INTO nodes(id, name, kind)
+VALUES ('local', 'Local node', 'local');
+
+INSERT OR IGNORE INTO settings(key, value)
+VALUES
+	('ui_locale', 'en'),
+	('public_client_endpoint_enabled', 'false'),
+	('backup_path', '/var/lib/olcpanel/backups'),
+	('quota_lock_mode', 'stop');
