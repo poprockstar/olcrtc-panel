@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -484,7 +485,7 @@ func registerSubscriptionRoutes(mux *http.ServeMux, deps dependencies) {
 }
 
 func writeSubscription(w http.ResponseWriter, r *http.Request, db *sql.DB, client clients.Client) {
-	if !client.Enabled {
+	if !subscriptionAvailable(client) {
 		http.NotFound(w, r)
 		return
 	}
@@ -513,6 +514,10 @@ func writeSubscription(w http.ResponseWriter, r *http.Request, db *sql.DB, clien
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	_, _ = w.Write([]byte(body))
+}
+
+func subscriptionAvailable(client clients.Client) bool {
+	return client.Enabled && client.ExpiryState != clients.ExpiryExpired && client.QuotaState != clients.QuotaExceeded
 }
 
 func registerAPIKeyRoutes(mux *http.ServeMux, deps dependencies) {
@@ -812,5 +817,9 @@ func cookieSecure(r *http.Request) bool {
 }
 
 func clientKey(r *http.Request, scope string) string {
-	return scope + ":" + r.RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return scope + ":" + r.RemoteAddr
+	}
+	return scope + ":" + host
 }

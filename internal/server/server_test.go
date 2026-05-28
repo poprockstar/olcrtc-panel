@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"olcpanel/internal/auth"
 	"olcpanel/internal/clients"
@@ -427,6 +428,25 @@ func TestLoginRateLimitReturnsTooManyRequests(t *testing.T) {
 	}
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("status after repeated failed logins = %d, want %d", rec.Code, http.StatusTooManyRequests)
+	}
+}
+
+func TestLoginRateLimitUsesRemoteHostAcrossPorts(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	if _, err := auth.CreateFirstAdmin(context.Background(), db, "admin", "correct horse battery"); err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+
+	var rec *httptest.ResponseRecorder
+	for i := 0; i < 6; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"username":"admin","password":"wrong horse battery"}`))
+		req.RemoteAddr = "198.51.100.8:" + strconv.Itoa(10000+i)
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+	}
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after repeated failed logins from same host = %d, want %d", rec.Code, http.StatusTooManyRequests)
 	}
 }
 
@@ -873,11 +893,26 @@ func TestSubscriptionEndpointsReturnNotFoundForInvalidOrUnavailableClients(t *te
 	for name, tc := range map[string]struct {
 		clientEnabled   bool
 		locationEnabled bool
+		expired         bool
+		quotaExceeded   bool
+		publicClient    bool
 		path            func(clients.Client) string
 	}{
 		"unknown token": {clientEnabled: true, locationEnabled: true, path: func(clients.Client) string { return "/sub/sub_missing" }},
 		"disabled client": {clientEnabled: false, locationEnabled: true, path: func(client clients.Client) string {
 			return "/sub/" + client.SubscriptionToken
+		}},
+		"expired client by token": {clientEnabled: true, locationEnabled: true, expired: true, path: func(client clients.Client) string {
+			return "/sub/" + client.SubscriptionToken
+		}},
+		"quota exceeded client by token": {clientEnabled: true, locationEnabled: true, quotaExceeded: true, path: func(client clients.Client) string {
+			return "/sub/" + client.SubscriptionToken
+		}},
+		"expired client by public id": {clientEnabled: true, locationEnabled: true, expired: true, publicClient: true, path: func(client clients.Client) string {
+			return "/c/" + client.ID
+		}},
+		"quota exceeded client by public id": {clientEnabled: true, locationEnabled: true, quotaExceeded: true, publicClient: true, path: func(client clients.Client) string {
+			return "/c/" + client.ID
 		}},
 		"no enabled locations": {clientEnabled: true, locationEnabled: false, path: func(client clients.Client) string {
 			return "/sub/" + client.SubscriptionToken
@@ -887,6 +922,38 @@ func TestSubscriptionEndpointsReturnNotFoundForInvalidOrUnavailableClients(t *te
 			db := testDB(t)
 			handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
 			client := seedSubscriptionClient(t, db, tc.clientEnabled, tc.locationEnabled)
+			if tc.expired {
+				expiresAt := time.Now().UTC().Add(-time.Hour)
+				updated, err := clients.UpdateClient(context.Background(), db, client.ID, clients.ClientInput{
+					Name:      client.Name,
+					Enabled:   &tc.clientEnabled,
+					ExpiresAt: &expiresAt,
+				})
+				if err != nil {
+					t.Fatalf("UpdateClient returned error: %v", err)
+				}
+				client = updated
+			}
+			if tc.quotaExceeded {
+				if _, err := db.ExecContext(context.Background(), `UPDATE clients SET quota_bytes = 100, quota_used_bytes = 100 WHERE id = ?`, client.ID); err != nil {
+					t.Fatalf("mark quota exceeded: %v", err)
+				}
+				updated, err := clients.GetClient(context.Background(), db, client.ID)
+				if err != nil {
+					t.Fatalf("GetClient returned error: %v", err)
+				}
+				client = updated
+			}
+			if tc.publicClient {
+				if err := storage.PutSettings(context.Background(), db, storage.Settings{
+					UILocale:                    "en",
+					PublicClientEndpointEnabled: true,
+					BackupPath:                  "/var/lib/olcpanel/backups",
+					QuotaLockMode:               "stop",
+				}); err != nil {
+					t.Fatalf("PutSettings returned error: %v", err)
+				}
+			}
 
 			req := httptest.NewRequest(http.MethodGet, tc.path(client), nil)
 			rec := httptest.NewRecorder()

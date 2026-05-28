@@ -73,6 +73,7 @@ type Runner interface {
 	Start(context.Context, LocationState) error
 	Restart(context.Context, LocationState, LocationState) error
 	Stop(context.Context, LocationState) error
+	Status(locationID string) ProcessStatus
 }
 
 type NoopRunner struct{}
@@ -87,6 +88,10 @@ func (NoopRunner) Restart(context.Context, LocationState, LocationState) error {
 
 func (NoopRunner) Stop(context.Context, LocationState) error {
 	return nil
+}
+
+func (NoopRunner) Status(string) ProcessStatus {
+	return ProcessRunning
 }
 
 type Supervisor struct {
@@ -156,6 +161,13 @@ func (supervisor *Supervisor) Reload(ctx context.Context) (ReloadResult, error) 
 			} else {
 				result.add(ActionResult{LocationID: entry.state.LocationID, ClientID: entry.state.ClientID, Action: ActionSkipped, Reason: entry.reason})
 			}
+		case isRunning && !supervisor.runnerRunning(entry.state.LocationID):
+			delete(supervisor.running, entry.state.LocationID)
+			if err := supervisor.runner.Start(ctx, entry.state); err != nil {
+				return ReloadResult{}, fmt.Errorf("start location %s: %w", entry.state.LocationID, err)
+			}
+			supervisor.running[entry.state.LocationID] = entry.state
+			result.add(ActionResult{LocationID: entry.state.LocationID, ClientID: entry.state.ClientID, Action: ActionStarted, Reason: ReasonNew})
 		case !isRunning:
 			if err := supervisor.runner.Start(ctx, entry.state); err != nil {
 				return ReloadResult{}, fmt.Errorf("start location %s: %w", entry.state.LocationID, err)
@@ -191,6 +203,10 @@ func (supervisor *Supervisor) Reload(ctx context.Context) (ReloadResult, error) 
 	}
 
 	return result, nil
+}
+
+func (supervisor *Supervisor) runnerRunning(locationID string) bool {
+	return supervisor.runner.Status(locationID) == ProcessRunning
 }
 
 func (result *ReloadResult) add(action ActionResult) {

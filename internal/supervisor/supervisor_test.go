@@ -52,6 +52,61 @@ func TestReloadLeavesUnchangedLocationsRunning(t *testing.T) {
 	}
 }
 
+func TestReloadRestartsDesiredLocationAfterRunnerReportsFailed(t *testing.T) {
+	db := testDB(t)
+	client, failed := seedClientLocation(t, db)
+	healthy := createLocation(t, db, client.ID, "Secondary", "wbstream", "datachannel")
+	runner := &recordingRunner{statuses: make(map[string]supervisor.ProcessStatus)}
+	sup := supervisor.New(db, supervisor.WithRunner(runner), supervisor.WithClock(fixedClock()))
+	if _, err := sup.Reload(context.Background()); err != nil {
+		t.Fatalf("initial Reload returned error: %v", err)
+	}
+	runner.calls = nil
+	runner.statuses[failed.ID] = supervisor.ProcessFailed
+
+	result, err := sup.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	assertSummary(t, result.Summary, supervisor.Summary{Started: 1, Unchanged: 1})
+	assertAction(t, result.Actions, failed.ID, supervisor.ActionStarted, supervisor.ReasonNew)
+	assertAction(t, result.Actions, healthy.ID, supervisor.ActionUnchanged, supervisor.ReasonUnchanged)
+	if got := runner.calls; len(got) != 1 || got[0] != "start:"+failed.ID {
+		t.Fatalf("runner calls = %#v, want start for failed location only", got)
+	}
+}
+
+func TestReloadStopsFailedLocationWhenItBecomesInactive(t *testing.T) {
+	db := testDB(t)
+	client, location := seedClientLocation(t, db)
+	runner := &recordingRunner{statuses: make(map[string]supervisor.ProcessStatus)}
+	sup := supervisor.New(db, supervisor.WithRunner(runner), supervisor.WithClock(fixedClock()))
+	if _, err := sup.Reload(context.Background()); err != nil {
+		t.Fatalf("initial Reload returned error: %v", err)
+	}
+	runner.calls = nil
+	runner.statuses[location.ID] = supervisor.ProcessFailed
+
+	disabled := false
+	updateLocation(t, db, client.ID, location.ID, clients.LocationInput{
+		Name:      location.Name,
+		Enabled:   &disabled,
+		Provider:  location.Provider,
+		Transport: location.Transport,
+	})
+	result, err := sup.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	assertSummary(t, result.Summary, supervisor.Summary{Stopped: 1})
+	assertAction(t, result.Actions, location.ID, supervisor.ActionStopped, supervisor.ReasonDisabledLocation)
+	if got := runner.calls; len(got) != 1 || got[0] != "stop:"+location.ID {
+		t.Fatalf("runner calls = %#v, want stop for failed inactive location", got)
+	}
+}
+
 func TestReloadRestartsOnlyChangedLocations(t *testing.T) {
 	db := testDB(t)
 	client, changed := seedClientLocation(t, db)
@@ -222,11 +277,15 @@ func TestReloadSkipsInactiveLocationsThatAreNotRunning(t *testing.T) {
 }
 
 type recordingRunner struct {
-	calls []string
+	calls    []string
+	statuses map[string]supervisor.ProcessStatus
 }
 
 func (runner *recordingRunner) Start(_ context.Context, location supervisor.LocationState) error {
 	runner.calls = append(runner.calls, "start:"+location.LocationID)
+	if runner.statuses != nil {
+		runner.statuses[location.LocationID] = supervisor.ProcessRunning
+	}
 	return nil
 }
 
@@ -237,7 +296,17 @@ func (runner *recordingRunner) Restart(_ context.Context, _, location supervisor
 
 func (runner *recordingRunner) Stop(_ context.Context, location supervisor.LocationState) error {
 	runner.calls = append(runner.calls, "stop:"+location.LocationID)
+	if runner.statuses != nil {
+		runner.statuses[location.LocationID] = supervisor.ProcessStopped
+	}
 	return nil
+}
+
+func (runner *recordingRunner) Status(locationID string) supervisor.ProcessStatus {
+	if runner.statuses == nil {
+		return supervisor.ProcessRunning
+	}
+	return runner.statuses[locationID]
 }
 
 func assertSummary(t *testing.T, got, want supervisor.Summary) {
