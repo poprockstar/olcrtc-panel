@@ -13,7 +13,7 @@ Last updated: 2026-05-28
 
 ## Phase State
 
-- Current phase: Phase 10 - Logs, Metrics, And Runtime Status API complete; Phase 11 - Frontend Operational UI is next.
+- Current phase: Phase 11 - Frontend Operational UI complete; Phase 12 - Backups And Restore is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -26,7 +26,8 @@ Last updated: 2026-05-28
   - Phase 8 - Netns, Veth, NAT, DNS, And TC
   - Phase 9 - Traffic Accounting, Quotas, And Expiry
   - Phase 10 - Logs, Metrics, And Runtime Status API
-- Next session target: start Phase 11 frontend operational UI for authenticated setup/login and operator observability screens.
+  - Phase 11 - Frontend Operational UI
+- Next session target: start Phase 12 backups and restore implementation.
 
 ## Implemented Capabilities
 
@@ -143,6 +144,16 @@ Last updated: 2026-05-28
 - Authenticated `GET /api/v1/metrics` added for session or API-key reads without CSRF.
 - Supervisor now exposes a read-only per-location runtime status snapshot, and location API responses overlay `running`, `stopped`, `failed`, or `pending` from the supervisor when available.
 - Failed child exits are visible through metrics process counts and location `runtime_status` responses.
+- Phase 11 frontend dependencies added: TanStack Query for API state, lucide-react for operational icons, qrcode for subscription QR generation, and Vitest/Testing Library for frontend behavior coverage.
+- Embedded React UI replaced the placeholder screen with authenticated setup/login, session and CSRF persistence, and a responsive admin shell.
+- UI localization now supports English and Russian, using saved `ui_locale` after authentication and browser language before settings load.
+- Dashboard view consumes `GET /api/v1/metrics` for uptime, host resources, client/location/process counts, traffic totals, quota alerts, expired clients, and per-client summaries.
+- Clients view consumes existing client and location CRUD APIs, including enabled state, expiry, quota fields, provider/transport presets, runtime status display, and unsupported provider/transport prevention.
+- Subscription panel builds private `/sub/{subscription_token}` URLs, fetches plaintext subscriptions, extracts `olcrtc://` lines, provides copy actions, and renders QR codes for the private URL and selected URI.
+- Logs view consumes `GET /api/v1/logs` with level/source/client/location/search/limit filters, JSON display, and plaintext download via `format=text`.
+- Settings view loads and saves the complete settings object for `ui_locale`, `public_client_endpoint_enabled`, `backup_path`, and `quota_lock_mode`.
+- Backups view is read-only Phase 12 readiness and displays the configured backup path without exposing unavailable backup/restore actions.
+- Embedded frontend assets in `internal/webui/dist/` were rebuilt after the Phase 11 UI build.
 
 ## Phase 0 Architecture Review Notes
 
@@ -257,6 +268,15 @@ Last updated: 2026-05-28
 - Runtime status status: supervisor snapshots now surface real per-location `running`, `failed`, and `pending` states through metrics and location API responses; stopped is represented when a status provider reports it.
 - Platform status: Linux host resource metrics use `/proc` and filesystem stats; Windows/non-Linux verification intentionally returns nullable host fields.
 
+## Phase 11 Completion Notes
+
+- Frontend status: authenticated operator UI is implemented for first-run setup, login/logout, dashboard metrics, clients, locations, subscriptions, logs, settings, reload, and backups readiness.
+- API contract status: no backend route, schema, CLI, or response-shape changes were made; the UI consumes the existing `/api/v1`, `/sub/{token}`, session cookie, and CSRF behavior.
+- Settings save status: the UI sends the full settings object on `PUT /api/v1/settings`, preserving the Phase 2 replace-all contract.
+- Provider/transport status: the UI exposes only the Phase 4 provider and transport enums and prevents unsupported combinations before submit while still surfacing backend errors.
+- Subscription status: private token URLs remain the default; public `/c/{client_id}` is only shown when `public_client_endpoint_enabled` is enabled.
+- Backup status: backup and restore actions remain deferred to Phase 12 and are not shown as disabled fake controls.
+
 ## Review Hardening Fixes Notes
 
 - No new roadmap features were pulled forward.
@@ -353,12 +373,21 @@ Last updated: 2026-05-28
   - `go build -o bin\olcpanel.exe .\cmd\olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
   - `go test -tags root_e2e ./internal/netstack` was not run in this Windows session; it remains a Linux/root/capability-enabled verification path.
+- Phase 11:
+  - `npm --prefix frontend install` passed; audit reported 0 vulnerabilities.
+  - `npm --prefix frontend run test` passed with 8 Vitest/Testing Library tests.
+  - `npm --prefix frontend run build` passed and rebuilt embedded assets.
+  - `go test ./...` passed.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+  - Vite dev server HTTP smoke at `http://127.0.0.1:5173/` returned HTTP 200 with the OlcRTC Panel shell.
+  - Full browser interaction QA was not run because the Browser Node REPL tool was not exposed in this session and Playwright is not installed/configured in the project.
 
 ## Open Risks And Blockers
 
 - SQLite is the only Phase 2 runtime-verified database. PostgreSQL URLs are recognized, but PostgreSQL driver/runtime support remains a future implementation task.
 - Rate limiting is in-memory, keyed by direct `RemoteAddr`, and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
-- Frontend auth/setup/login, client/location, logs, metrics, and runtime status screens are not implemented yet; operators must use direct API calls until Phase 11.
+- Browser-level visual QA for Phase 11 remains to be performed in an environment with the Browser plugin Node REPL tool or a configured Playwright workflow.
 - Real OlcRTC session verification remains a Linux deployment check; Phase 7 unit tests use fake executables to prove process lifecycle behavior.
 - Standalone CLI reload remains pending daemon IPC or HTTP-client design.
 - Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
