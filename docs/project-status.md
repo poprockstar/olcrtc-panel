@@ -13,7 +13,7 @@ Last updated: 2026-05-27
 
 ## Phase State
 
-- Current phase: Phase 5 - Subscription Rendering
+- Current phase: Review hardening fixes complete; Phase 5 - Subscription Rendering is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -69,6 +69,13 @@ Last updated: 2026-05-27
 - OlcRTC provider/transport validation added for Phase 4 presets: `telemost`, `wbstream`, and `jitsi`; stable and unstable transports are accepted, unsupported combinations are rejected.
 - `transport_payload` is normalized and returned as JSON for `datachannel`, `vp8channel`, `seichannel`, and `videochannel`; `datachannel` requires an empty object.
 - `POST /api/v1/clients/{id}/rotate` rotates crypto keys by default and rotates stored room IDs when `rotate_rooms` is true.
+- JSON request decoding now caps body size, rejects empty/malformed/unknown/trailing JSON, and returns `413` for oversized API request bodies.
+- CSRF verification now uses constant-time hash comparison.
+- In-memory rate limiting now keys off `RemoteAddr` only and prunes expired attempt keys.
+- API-key revoke now reports missing or already-revoked keys as not found; `DELETE /api/v1/api-keys/{id}` returns `404` for that case.
+- SQLite connections now enable `PRAGMA foreign_keys = ON` and set `PRAGMA busy_timeout = 5000`.
+- Server route registration is split into focused state, auth, settings, clients, API-key, and static groups while preserving `server.New(cfg, assets, options...)`.
+- Embedded frontend copy now reflects the current API-backed state instead of the Phase 1 skeleton.
 
 ## Phase 0 Architecture Review Notes
 
@@ -123,6 +130,16 @@ Last updated: 2026-05-27
 - Runtime enforcement for disabled, expired, and quota-exceeded states remains deferred to later supervisor/accounting phases.
 - No frontend operator UI was added in Phase 4; direct API usage remains the management path until Phase 11.
 
+## Review Hardening Fixes Notes
+
+- No new roadmap features were pulled forward.
+- Public route names and successful response schemas were preserved.
+- Intentional error behavior changes:
+  - trailing JSON and empty/malformed JSON return `400`;
+  - oversized JSON request bodies return `413`;
+  - deleting a missing or already-revoked API key returns `404`.
+- Existing user-owned `go.mod` and `go.sum` dependency edits were preserved.
+
 ## Dependency Update Notes
 
 - No API, route, database schema, CLI, or intended UI behavior changes were made.
@@ -169,11 +186,18 @@ Last updated: 2026-05-27
   - `npm --prefix frontend run build` passed.
   - `go build -o bin\olcpanel.exe .\cmd\olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
+- Review hardening fixes:
+  - `go test ./internal/auth ./internal/storage ./internal/server` passed.
+  - `go test ./...` passed.
+  - `go vet ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
 
 ## Open Risks And Blockers
 
 - SQLite is the only Phase 2 runtime-verified database. PostgreSQL URLs are recognized, but PostgreSQL driver/runtime support remains a future implementation task.
-- Phase 3 rate limiting is in-memory and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
+- Rate limiting is in-memory, keyed by direct `RemoteAddr`, and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
 - Frontend auth/setup/login and client/location screens are not implemented yet; operators must use direct API calls until Phase 11.
 - Phase 4 stores disabled, expiry, and quota fields and reports derived states, but runtime enforcement is intentionally deferred.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.

@@ -89,6 +89,26 @@ func TestPutSettingsPersistsCoreSettings(t *testing.T) {
 	}
 }
 
+func TestOpenSQLiteEnablesConnectionPragmas(t *testing.T) {
+	db := openMigratedSQLite(t)
+
+	var foreignKeys int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatalf("read foreign_keys pragma: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("foreign_keys = %d, want 1", foreignKeys)
+	}
+
+	var busyTimeout int
+	if err := db.QueryRow(`PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatalf("read busy_timeout pragma: %v", err)
+	}
+	if busyTimeout < 5000 {
+		t.Fatalf("busy_timeout = %d, want at least 5000", busyTimeout)
+	}
+}
+
 func openMigratedSQLite(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()

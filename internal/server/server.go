@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -16,6 +17,8 @@ import (
 	"olcpanel/internal/config"
 	"olcpanel/internal/storage"
 )
+
+const maxJSONBodyBytes = 1 << 20
 
 type StateResponse struct {
 	Service       string `json:"service"`
@@ -51,7 +54,17 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 	}
 
 	mux := http.NewServeMux()
+	registerStateRoutes(mux, cfg, deps)
+	registerAuthRoutes(mux, deps)
+	registerSettingsRoutes(mux, deps)
+	registerClientRoutes(mux, deps)
+	registerAPIKeyRoutes(mux, deps)
+	registerStaticRoutes(mux, assets)
 
+	return mux
+}
+
+func registerStateRoutes(mux *http.ServeMux, cfg config.Config, deps dependencies) {
 	mux.HandleFunc("GET /api/v1/state", func(w http.ResponseWriter, r *http.Request) {
 		setupRequired := true
 		authenticated := false
@@ -73,7 +86,9 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 			Authenticated: authenticated,
 		})
 	})
+}
 
+func registerAuthRoutes(mux *http.ServeMux, deps dependencies) {
 	mux.HandleFunc("POST /api/v1/setup", func(w http.ResponseWriter, r *http.Request) {
 		if deps.db == nil {
 			http.Error(w, "database is unavailable", http.StatusServiceUnavailable)
@@ -161,7 +176,9 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 		clearSessionCookie(w, r)
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
 
+func registerSettingsRoutes(mux *http.ServeMux, deps dependencies) {
 	mux.HandleFunc("GET /api/v1/settings", func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := deps.requireAdmin(w, r, false); !ok {
 			return
@@ -196,7 +213,9 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 
 		writeJSON(w, settings)
 	})
+}
 
+func registerClientRoutes(mux *http.ServeMux, deps dependencies) {
 	mux.HandleFunc("GET /api/v1/clients", func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := deps.requireAdmin(w, r, false); !ok {
 			return
@@ -368,7 +387,9 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 		}
 		writeJSON(w, locations)
 	})
+}
 
+func registerAPIKeyRoutes(mux *http.ServeMux, deps dependencies) {
 	mux.HandleFunc("GET /api/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := deps.requireSessionAdmin(w, r, false); !ok {
 			return
@@ -406,13 +427,18 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 			http.Error(w, "invalid api key id", http.StatusBadRequest)
 			return
 		}
-		if err := auth.RevokeAPIKey(r.Context(), deps.db, id); err != nil {
+		if err := auth.RevokeAPIKey(r.Context(), deps.db, id); errors.Is(err, auth.ErrNotFound) {
+			http.Error(w, "api key not found", http.StatusNotFound)
+			return
+		} else if err != nil {
 			http.Error(w, "failed to revoke api key", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+}
 
+func registerStaticRoutes(mux *http.ServeMux, assets fs.FS) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
@@ -437,8 +463,6 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 	})
-
-	return mux
 }
 
 type credentialsRequest struct {
@@ -487,9 +511,25 @@ func writeJSON(w http.ResponseWriter, value any) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, value any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "JSON body is too large", http.StatusRequestEntityTooLarge)
+			return false
+		}
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return false
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			http.Error(w, "JSON body is too large", http.StatusRequestEntityTooLarge)
+			return false
+		}
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return false
 	}
@@ -645,10 +685,5 @@ func cookieSecure(r *http.Request) bool {
 }
 
 func clientKey(r *http.Request, scope string) string {
-	host := r.RemoteAddr
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		host, _, _ = strings.Cut(forwarded, ",")
-		host = strings.TrimSpace(host)
-	}
-	return scope + ":" + host
+	return scope + ":" + r.RemoteAddr
 }

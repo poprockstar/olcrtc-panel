@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"testing/fstest"
 
@@ -97,6 +99,43 @@ func TestSetupChangesStateAndReturnsSession(t *testing.T) {
 	}
 	if state.SetupRequired || !state.Authenticated {
 		t.Fatalf("state = %#v, want setup complete and authenticated", state)
+	}
+}
+
+func TestSetupRejectsTrailingJSON(t *testing.T) {
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(testDB(t)))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","password":"correct horse battery"} {}`))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestSetupRejectsOversizedJSON(t *testing.T) {
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(testDB(t)))
+	body := `{"username":"admin","password":"` + strings.Repeat("x", 1<<20) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body.String())
+	}
+}
+
+func TestSetupRejectsEmptyJSON(t *testing.T) {
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(testDB(t)))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewReader(nil))
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusBadRequest)
 	}
 }
 
@@ -219,6 +258,24 @@ func TestAPIKeyCanReadAndUpdateSettingsWithoutCSRF(t *testing.T) {
 	}
 }
 
+func TestDeleteAPIKeyReturnsNotFoundForMissingKey(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	cookies, csrf := loginSession(t, handler)
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/api-keys/999", nil)
+	deleteReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		deleteReq.AddCookie(cookie)
+	}
+	deleteRec := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRec, deleteReq)
+
+	if deleteRec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want %d, body: %s", deleteRec.Code, http.StatusNotFound, deleteRec.Body.String())
+	}
+}
+
 func TestLogoutClearsSession(t *testing.T) {
 	db := testDB(t)
 	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
@@ -243,6 +300,26 @@ func TestLogoutClearsSession(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("post-logout status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestLoginRateLimitIgnoresForwardedFor(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	if _, err := auth.CreateFirstAdmin(context.Background(), db, "admin", "correct horse battery"); err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+
+	var rec *httptest.ResponseRecorder
+	for i := 0; i < 6; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/login", bytes.NewBufferString(`{"username":"admin","password":"wrong horse battery"}`))
+		req.RemoteAddr = "198.51.100.42:1234"
+		req.Header.Set("X-Forwarded-For", "203.0.113."+strconv.Itoa(i))
+		rec = httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+	}
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status after spoofed forwarded-for logins = %d, want %d", rec.Code, http.StatusTooManyRequests)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -25,6 +26,7 @@ var (
 	ErrSetupComplete     = errors.New("setup is already complete")
 	ErrInvalidCredential = errors.New("invalid username or password")
 	ErrUnauthorized      = errors.New("unauthorized")
+	ErrNotFound          = errors.New("not found")
 )
 
 type User struct {
@@ -69,6 +71,19 @@ func (limiter *RateLimiter) Allow(key string) bool {
 
 	now := time.Now().UTC()
 	cutoff := now.Add(-limiter.window)
+	for attemptKey, attempts := range limiter.attempts {
+		recent := attempts[:0]
+		for _, attempt := range attempts {
+			if attempt.After(cutoff) {
+				recent = append(recent, attempt)
+			}
+		}
+		if len(recent) == 0 {
+			delete(limiter.attempts, attemptKey)
+			continue
+		}
+		limiter.attempts[attemptKey] = recent
+	}
 	recent := limiter.attempts[key][:0]
 	for _, attempt := range limiter.attempts[key] {
 		if attempt.After(cutoff) {
@@ -210,7 +225,10 @@ func RevokeSession(ctx context.Context, db *sql.DB, sessionID string) error {
 }
 
 func VerifyCSRF(session Session, csrfToken string) bool {
-	return session.CSRFTokenHash != "" && HashToken(csrfToken) == session.CSRFTokenHash
+	if session.CSRFTokenHash == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(HashToken(csrfToken)), []byte(session.CSRFTokenHash)) == 1
 }
 
 func CreateAPIKey(ctx context.Context, db *sql.DB, name string) (APIKey, string, error) {
@@ -286,8 +304,16 @@ WHERE token_hash = ? AND revoked_at IS NULL`, HashToken(rawToken)).Scan(&key.ID,
 }
 
 func RevokeAPIKey(ctx context.Context, db *sql.DB, id int64) error {
-	if _, err := db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL`, id); err != nil {
+	result, err := db.ExecContext(ctx, `UPDATE api_keys SET revoked_at = CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL`, id)
+	if err != nil {
 		return fmt.Errorf("revoke api key: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read revoked api key count: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

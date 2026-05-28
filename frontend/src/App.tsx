@@ -9,14 +9,14 @@ const copy: Record<Locale, {
   en: {
     eyebrow: "OlcRTC Panel",
     title: "Local VPS control panel",
-    status: "Phase 1 skeleton is running.",
-    next: "First-run setup, login, and client management arrive in later phases."
+    status: "Core API, auth, and client management endpoints are available.",
+    next: "Operator screens remain scheduled for the UI phase; use the secured API for current management."
   },
   ru: {
     eyebrow: "OlcRTC Panel",
     title: "Локальная панель VPS",
-    status: "Скелет Phase 1 запущен.",
-    next: "Первичная настройка, вход и управление клиентами появятся в следующих фазах."
+    status: "Доступны основные API, авторизация и управление клиентами.",
+    next: "Операторские экраны запланированы для UI-фазы; сейчас управление выполняется через защищенный API."
   }
 };
 

@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -56,6 +57,17 @@ func TestSessionsExpire(t *testing.T) {
 	}
 }
 
+func TestVerifyCSRFAcceptsOnlyMatchingToken(t *testing.T) {
+	session := auth.Session{CSRFTokenHash: auth.HashToken("valid-token")}
+
+	if !auth.VerifyCSRF(session, "valid-token") {
+		t.Fatal("VerifyCSRF rejected a valid token")
+	}
+	if auth.VerifyCSRF(session, "invalid-token") {
+		t.Fatal("VerifyCSRF accepted an invalid token")
+	}
+}
+
 func TestRevokedAPIKeyStopsAuthenticating(t *testing.T) {
 	ctx := context.Background()
 	db := testDB(t)
@@ -75,6 +87,26 @@ func TestRevokedAPIKeyStopsAuthenticating(t *testing.T) {
 	}
 	if _, err := auth.AuthenticateAPIKey(ctx, db, rawToken); err == nil {
 		t.Fatal("AuthenticateAPIKey accepted revoked key")
+	}
+}
+
+func TestRevokeAPIKeyReturnsNotFoundForMissingOrRevokedKey(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+
+	if err := auth.RevokeAPIKey(ctx, db, 999); !errors.Is(err, auth.ErrNotFound) {
+		t.Fatalf("missing key error = %v, want ErrNotFound", err)
+	}
+
+	key, _, err := auth.CreateAPIKey(ctx, db, "deploy")
+	if err != nil {
+		t.Fatalf("CreateAPIKey returned error: %v", err)
+	}
+	if err := auth.RevokeAPIKey(ctx, db, key.ID); err != nil {
+		t.Fatalf("RevokeAPIKey returned error: %v", err)
+	}
+	if err := auth.RevokeAPIKey(ctx, db, key.ID); !errors.Is(err, auth.ErrNotFound) {
+		t.Fatalf("revoked key error = %v, want ErrNotFound", err)
 	}
 }
 
