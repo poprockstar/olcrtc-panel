@@ -13,14 +13,15 @@ Last updated: 2026-05-27
 
 ## Phase State
 
-- Current phase: Review hardening fixes complete; Phase 5 - Subscription Rendering is next.
+- Current phase: Phase 5 - Subscription Rendering complete; Phase 6 - Supervisor And Reload Diff is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
   - Phase 2 - Storage, Migrations, And Settings
   - Phase 3 - Auth And Security Baseline
   - Phase 4 - Clients And Locations Domain API
-- Next session target: start Phase 5 subscription rendering with private subscription tokens and `olcrtc://` output.
+  - Phase 5 - Subscription Rendering
+- Next session target: start Phase 6 supervisor desired-state loading and reload diff behavior.
 
 ## Implemented Capabilities
 
@@ -76,6 +77,14 @@ Last updated: 2026-05-27
 - SQLite connections now enable `PRAGMA foreign_keys = ON` and set `PRAGMA busy_timeout = 5000`.
 - Server route registration is split into focused state, auth, settings, clients, API-key, and static groups while preserving `server.New(cfg, assets, options...)`.
 - Embedded frontend copy now reflects the current API-backed state instead of the Phase 1 skeleton.
+- Schema migration version 4 adds `clients.subscription_token`, backfills existing clients with private `sub_...` tokens, and enforces token uniqueness.
+- New clients receive private subscription tokens, and authenticated client JSON includes `subscription_token`.
+- `internal/subscriptions` added as pure rendering logic for official `olcrtc://` URIs and plaintext `sub.md` subscription documents.
+- Subscription URI rendering supports `datachannel`, `vp8channel`, `seichannel`, and `videochannel` payload aliases and omits data/default payload blocks.
+- Video transport payload validation now accepts the official `nvenc`, `high`/`highest`, `tile_module`, and `tile_rs` fields used by the URI renderer.
+- `GET /sub/{token}` added as an unauthenticated plaintext subscription endpoint.
+- `GET /c/{client_id}` added as an opt-in plaintext endpoint gated by `public_client_endpoint_enabled`; it remains disabled by default.
+- `POST /api/v1/clients/{id}/rotate` accepts `rotate_subscription_token`; rotating it invalidates old `/sub/{token}` links.
 
 ## Phase 0 Architecture Review Notes
 
@@ -129,6 +138,17 @@ Last updated: 2026-05-27
 - Location response fields include enabled state, provider, transport, transport stability, room ID, crypto key, normalized transport payload, DNS, runtime status, and timestamps.
 - Runtime enforcement for disabled, expired, and quota-exceeded states remains deferred to later supervisor/accounting phases.
 - No frontend operator UI was added in Phase 4; direct API usage remains the management path until Phase 11.
+
+## Phase 5 Completion Notes
+
+- Schema version: `4` (`004_phase5_subscription_tokens.sql`).
+- Private subscription token status: every client has a unique `sub_...` token; new clients receive one at creation and existing clients are backfilled during migration.
+- Subscription API status: `GET /sub/{token}` returns `text/plain; charset=utf-8` without admin auth for enabled clients with at least one enabled location.
+- Public client endpoint status: `GET /c/{client_id}` is disabled by default and only returns the same plaintext subscription when `public_client_endpoint_enabled` is `true`.
+- Subscription renderer status: outputs `#name`, `#update`, `#refresh`, `#used`, `#available`, per-location `olcrtc://` lines, and `##name`, `##used`, `##available`, `##comment`.
+- URI payload status: renders official aliases for VP8 (`vp8-fps`, `vp8-batch`), SEI (`fps`, `batch`, `frag`, `ack-ms`), and video (`video-*`) payload fields; `datachannel` and default payloads omit the payload block.
+- Token rotation status: `rotate_subscription_token` changes only the private subscription token unless `rotate_rooms` is also requested; old token URLs return `404`.
+- Runtime enforcement for disabled, expired, and quota-exceeded states remains deferred; Phase 5 only reports current quota metadata in the plaintext output.
 
 ## Review Hardening Fixes Notes
 
@@ -193,6 +213,11 @@ Last updated: 2026-05-27
   - `npm --prefix frontend run build` passed.
   - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+- Phase 5:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
 
 ## Open Risks And Blockers
 
@@ -200,6 +225,8 @@ Last updated: 2026-05-27
 - Rate limiting is in-memory, keyed by direct `RemoteAddr`, and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
 - Frontend auth/setup/login and client/location screens are not implemented yet; operators must use direct API calls until Phase 11.
 - Phase 4 stores disabled, expiry, and quota fields and reports derived states, but runtime enforcement is intentionally deferred.
+- Phase 5 subscription output reports quota metadata but does not enforce quota/expiry at runtime; enforcement remains a later supervisor/accounting responsibility.
+- Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
 - Current verification ran from Windows, but production assumptions and later e2e tests must target Linux servers.
 - Linux netns/veth/tc/root tests will require an isolated Linux environment and must stay separate from normal unit tests.

@@ -16,6 +16,7 @@ import (
 	"olcpanel/internal/clients"
 	"olcpanel/internal/config"
 	"olcpanel/internal/storage"
+	"olcpanel/internal/subscriptions"
 )
 
 const maxJSONBodyBytes = 1 << 20
@@ -58,6 +59,7 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 	registerAuthRoutes(mux, deps)
 	registerSettingsRoutes(mux, deps)
 	registerClientRoutes(mux, deps)
+	registerSubscriptionRoutes(mux, deps)
 	registerAPIKeyRoutes(mux, deps)
 	registerStaticRoutes(mux, assets)
 
@@ -376,7 +378,22 @@ func registerClientRoutes(mux *http.ServeMux, deps dependencies) {
 		if !decodeJSON(w, r, &input) {
 			return
 		}
-		locations, err := clients.RotateClientLocations(r.Context(), deps.db, r.PathValue("id"), input.RotateRooms)
+		if input.RotateSubscriptionToken {
+			if _, err := clients.RotateClientSubscriptionToken(r.Context(), deps.db, r.PathValue("id")); errors.Is(err, clients.ErrNotFound) {
+				http.Error(w, "client not found", http.StatusNotFound)
+				return
+			} else if err != nil {
+				http.Error(w, "failed to rotate subscription token", http.StatusInternalServerError)
+				return
+			}
+		}
+		var locations []clients.Location
+		var err error
+		if input.RotateSubscriptionToken && !input.RotateRooms {
+			locations, err = clients.ListLocations(r.Context(), deps.db, r.PathValue("id"))
+		} else {
+			locations, err = clients.RotateClientLocations(r.Context(), deps.db, r.PathValue("id"), input.RotateRooms)
+		}
 		if errors.Is(err, clients.ErrNotFound) {
 			http.Error(w, "client not found", http.StatusNotFound)
 			return
@@ -387,6 +404,83 @@ func registerClientRoutes(mux *http.ServeMux, deps dependencies) {
 		}
 		writeJSON(w, locations)
 	})
+}
+
+func registerSubscriptionRoutes(mux *http.ServeMux, deps dependencies) {
+	mux.HandleFunc("GET /sub/{token}", func(w http.ResponseWriter, r *http.Request) {
+		if deps.db == nil {
+			http.Error(w, "database is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		client, err := clients.GetClientBySubscriptionToken(r.Context(), deps.db, r.PathValue("token"))
+		if errors.Is(err, clients.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to read subscription", http.StatusInternalServerError)
+			return
+		}
+		writeSubscription(w, r, deps.db, client)
+	})
+
+	mux.HandleFunc("GET /c/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if deps.db == nil {
+			http.Error(w, "database is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		settings, err := storage.GetSettings(r.Context(), deps.db)
+		if err != nil {
+			http.Error(w, "failed to read settings", http.StatusInternalServerError)
+			return
+		}
+		if !settings.PublicClientEndpointEnabled {
+			http.NotFound(w, r)
+			return
+		}
+		client, err := clients.GetClient(r.Context(), deps.db, r.PathValue("id"))
+		if errors.Is(err, clients.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to read subscription", http.StatusInternalServerError)
+			return
+		}
+		writeSubscription(w, r, deps.db, client)
+	})
+}
+
+func writeSubscription(w http.ResponseWriter, r *http.Request, db *sql.DB, client clients.Client) {
+	if !client.Enabled {
+		http.NotFound(w, r)
+		return
+	}
+	locations, err := clients.ListLocations(r.Context(), db, client.ID)
+	if errors.Is(err, clients.ErrNotFound) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "failed to read subscription locations", http.StatusInternalServerError)
+		return
+	}
+	body, err := subscriptions.Render(subscriptions.Snapshot{
+		Client:    client,
+		Locations: locations,
+		UpdatedAt: time.Now().UTC(),
+		Refresh:   "10m",
+	})
+	if errors.Is(err, subscriptions.ErrNoEnabledLocations) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, "failed to render subscription", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(body))
 }
 
 func registerAPIKeyRoutes(mux *http.ServeMux, deps dependencies) {
@@ -497,7 +591,8 @@ type locationRequest struct {
 }
 
 type rotateRequest struct {
-	RotateRooms bool `json:"rotate_rooms"`
+	RotateRooms             bool `json:"rotate_rooms"`
+	RotateSubscriptionToken bool `json:"rotate_subscription_token"`
 }
 
 type requestAuth struct {

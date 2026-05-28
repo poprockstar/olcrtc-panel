@@ -3,7 +3,9 @@ package storage_test
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"olcpanel/internal/storage"
@@ -28,6 +30,58 @@ func TestMigrateCreatesPhase2Tables(t *testing.T) {
 		if !tableExists(t, db, table) {
 			t.Fatalf("expected table %q to exist", table)
 		}
+	}
+}
+
+func TestPhase5MigrationBackfillsSubscriptionTokens(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, sqliteURL(t))
+	if err != nil {
+		t.Fatalf("Open returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE schema_migrations (
+	version INTEGER PRIMARY KEY,
+	name TEXT NOT NULL,
+	applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+)`); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	for _, migration := range []string{
+		"001_phase2_core.sql",
+		"002_phase3_auth.sql",
+		"003_phase4_clients_locations.sql",
+	} {
+		applyMigrationFile(t, db, migration)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO clients(id, node_id, name, enabled, quota_used_bytes, updated_at)
+VALUES ('cl_existing', 'local', 'Existing', 1, 0, CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatalf("insert pre-phase5 client: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO schema_migrations(version, name)
+VALUES (1, '001_phase2_core.sql'), (2, '002_phase3_auth.sql'), (3, '003_phase4_clients_locations.sql')`); err != nil {
+		t.Fatalf("record earlier migrations: %v", err)
+	}
+
+	if err := storage.Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate returned error: %v", err)
+	}
+
+	var token string
+	if err := db.QueryRowContext(ctx, `SELECT subscription_token FROM clients WHERE id = 'cl_existing'`).Scan(&token); err != nil {
+		t.Fatalf("read subscription token: %v", err)
+	}
+	if !strings.HasPrefix(token, "sub_") {
+		t.Fatalf("subscription token = %q, want sub_ prefix", token)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO clients(id, node_id, name, enabled, quota_used_bytes, subscription_token, updated_at)
+VALUES ('cl_duplicate', 'local', 'Duplicate', 1, 0, ?, CURRENT_TIMESTAMP)`, token); err == nil {
+		t.Fatal("insert duplicate subscription token succeeded, want unique constraint error")
 	}
 }
 
@@ -149,5 +203,16 @@ func assertCount(t *testing.T, db *sql.DB, table string, want int) {
 	}
 	if got != want {
 		t.Fatalf("%s count = %d, want %d", table, got, want)
+	}
+}
+
+func applyMigrationFile(t *testing.T, db *sql.DB, name string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join("migrations", name))
+	if err != nil {
+		t.Fatalf("read migration %s: %v", name, err)
+	}
+	if _, err := db.Exec(string(data)); err != nil {
+		t.Fatalf("apply migration %s: %v", name, err)
 	}
 }

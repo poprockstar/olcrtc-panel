@@ -53,17 +53,18 @@ func (payload RawPayload) MarshalJSON() ([]byte, error) {
 }
 
 type Client struct {
-	ID             string      `json:"id"`
-	Name           string      `json:"name"`
-	Enabled        bool        `json:"enabled"`
-	ExpiresAt      *time.Time  `json:"expires_at"`
-	QuotaBytes     *int64      `json:"quota_bytes"`
-	QuotaUsedBytes int64       `json:"quota_used_bytes"`
-	QuotaState     QuotaState  `json:"quota_state"`
-	ExpiryState    ExpiryState `json:"expiry_state"`
-	LocationsCount int         `json:"locations_count"`
-	CreatedAt      time.Time   `json:"created_at"`
-	UpdatedAt      time.Time   `json:"updated_at"`
+	ID                string      `json:"id"`
+	Name              string      `json:"name"`
+	SubscriptionToken string      `json:"subscription_token"`
+	Enabled           bool        `json:"enabled"`
+	ExpiresAt         *time.Time  `json:"expires_at"`
+	QuotaBytes        *int64      `json:"quota_bytes"`
+	QuotaUsedBytes    int64       `json:"quota_used_bytes"`
+	QuotaState        QuotaState  `json:"quota_state"`
+	ExpiryState       ExpiryState `json:"expiry_state"`
+	LocationsCount    int         `json:"locations_count"`
+	CreatedAt         time.Time   `json:"created_at"`
+	UpdatedAt         time.Time   `json:"updated_at"`
 }
 
 type ClientInput struct {
@@ -110,13 +111,17 @@ func CreateClient(ctx context.Context, db *sql.DB, input ClientInput) (Client, e
 	if err != nil {
 		return Client{}, err
 	}
+	token, err := GenerateSubscriptionToken()
+	if err != nil {
+		return Client{}, err
+	}
 	if input.QuotaBytes != nil && *input.QuotaBytes < 0 {
 		return Client{}, errors.New("quota_bytes must be null or non-negative")
 	}
 	if _, err := db.ExecContext(ctx, `
-INSERT INTO clients(id, node_id, name, enabled, expires_at, quota_bytes, quota_used_bytes, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`,
-		id, localNodeID, name, boolInt(enabled), formatNullableTime(input.ExpiresAt), nullableInt64(input.QuotaBytes)); err != nil {
+INSERT INTO clients(id, node_id, name, subscription_token, enabled, expires_at, quota_bytes, quota_used_bytes, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`,
+		id, localNodeID, name, token, boolInt(enabled), formatNullableTime(input.ExpiresAt), nullableInt64(input.QuotaBytes)); err != nil {
 		return Client{}, fmt.Errorf("insert client: %w", err)
 	}
 	return GetClient(ctx, db, id)
@@ -124,7 +129,7 @@ VALUES (?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP)`,
 
 func ListClients(ctx context.Context, db *sql.DB) ([]Client, error) {
 	rows, err := db.QueryContext(ctx, `
-SELECT c.id, c.name, c.enabled, c.expires_at, c.quota_bytes, c.quota_used_bytes, COUNT(l.id), c.created_at, c.updated_at
+SELECT c.id, c.name, c.subscription_token, c.enabled, c.expires_at, c.quota_bytes, c.quota_used_bytes, COUNT(l.id), c.created_at, c.updated_at
 FROM clients c
 LEFT JOIN locations l ON l.client_id = c.id
 WHERE c.node_id = ?
@@ -151,11 +156,25 @@ ORDER BY c.created_at, c.id`, localNodeID)
 
 func GetClient(ctx context.Context, db *sql.DB, id string) (Client, error) {
 	row := db.QueryRowContext(ctx, `
-SELECT c.id, c.name, c.enabled, c.expires_at, c.quota_bytes, c.quota_used_bytes, COUNT(l.id), c.created_at, c.updated_at
+SELECT c.id, c.name, c.subscription_token, c.enabled, c.expires_at, c.quota_bytes, c.quota_used_bytes, COUNT(l.id), c.created_at, c.updated_at
 FROM clients c
 LEFT JOIN locations l ON l.client_id = c.id
 WHERE c.node_id = ? AND c.id = ?
 GROUP BY c.id`, localNodeID, id)
+	client, err := scanClient(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Client{}, ErrNotFound
+	}
+	return client, err
+}
+
+func GetClientBySubscriptionToken(ctx context.Context, db *sql.DB, token string) (Client, error) {
+	row := db.QueryRowContext(ctx, `
+SELECT c.id, c.name, c.subscription_token, c.enabled, c.expires_at, c.quota_bytes, c.quota_used_bytes, COUNT(l.id), c.created_at, c.updated_at
+FROM clients c
+LEFT JOIN locations l ON l.client_id = c.id
+WHERE c.node_id = ? AND c.subscription_token = ?
+GROUP BY c.id`, localNodeID, strings.TrimSpace(token))
 	client, err := scanClient(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Client{}, ErrNotFound
@@ -361,6 +380,27 @@ WHERE node_id = ? AND client_id = ? AND id = ?`, locations[i].CryptoKey, locatio
 	return ListLocations(ctx, db, clientID)
 }
 
+func RotateClientSubscriptionToken(ctx context.Context, db *sql.DB, clientID string) (Client, error) {
+	if _, err := GetClient(ctx, db, clientID); err != nil {
+		return Client{}, err
+	}
+	token, err := GenerateSubscriptionToken()
+	if err != nil {
+		return Client{}, err
+	}
+	result, err := db.ExecContext(ctx, `
+UPDATE clients
+SET subscription_token = ?, updated_at = CURRENT_TIMESTAMP
+WHERE node_id = ? AND id = ?`, token, localNodeID, clientID)
+	if err != nil {
+		return Client{}, fmt.Errorf("rotate subscription token: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return Client{}, ErrNotFound
+	}
+	return GetClient(ctx, db, clientID)
+}
+
 func DeriveStates(client Client, now time.Time) (QuotaState, ExpiryState) {
 	quota := QuotaUnlimited
 	if client.QuotaBytes != nil {
@@ -457,9 +497,11 @@ func NormalizeTransportPayload(transport, payload string) (string, error) {
 			"height":      positiveInteger,
 			"fps":         positiveInteger,
 			"bitrate":     nonEmptyString,
-			"hw":          oneOf("none", "auto"),
-			"qr_recovery": oneOf("low", "medium", "quartile", "high"),
+			"hw":          oneOf("none", "nvenc"),
+			"qr_recovery": oneOf("low", "medium", "high", "highest"),
 			"qr_size":     nonNegativeInteger,
+			"tile_module": integerBetween(1, 270),
+			"tile_rs":     integerBetween(0, 200),
 		})
 	default:
 		return "", errors.New("transport must be one of datachannel, vp8channel, seichannel, videochannel")
@@ -474,6 +516,10 @@ func GenerateCryptoKey() (string, error) {
 	return hex.EncodeToString(data[:]), nil
 }
 
+func GenerateSubscriptionToken() (string, error) {
+	return randomID("sub")
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }
@@ -484,7 +530,7 @@ func scanClient(row scanner) (Client, error) {
 	var expires sql.NullString
 	var quota sql.NullInt64
 	var created, updated string
-	if err := row.Scan(&client.ID, &client.Name, &enabled, &expires, &quota, &client.QuotaUsedBytes, &client.LocationsCount, &created, &updated); err != nil {
+	if err := row.Scan(&client.ID, &client.Name, &client.SubscriptionToken, &enabled, &expires, &quota, &client.QuotaUsedBytes, &client.LocationsCount, &created, &updated); err != nil {
 		return Client{}, err
 	}
 	client.Enabled = enabled != 0
@@ -649,8 +695,12 @@ func normalizeObjectPayload(payload string, defaults map[string]any, validators 
 			values[key] = value
 		}
 	}
-	for key, validate := range validators {
-		if err := validate(values[key]); err != nil {
+	for key, value := range values {
+		validate, ok := validators[key]
+		if !ok {
+			continue
+		}
+		if err := validate(value); err != nil {
 			return "", fmt.Errorf("%s %w", key, err)
 		}
 	}
@@ -675,6 +725,16 @@ func nonNegativeInteger(value any) error {
 		return errors.New("must be a non-negative integer")
 	}
 	return nil
+}
+
+func integerBetween(minValue, maxValue int64) validator {
+	return func(value any) error {
+		number, ok := value.(float64)
+		if !ok || number != float64(int64(number)) || int64(number) < minValue || int64(number) > maxValue {
+			return fmt.Errorf("must be an integer between %d and %d", minValue, maxValue)
+		}
+		return nil
+	}
 }
 
 func nonEmptyString(value any) error {

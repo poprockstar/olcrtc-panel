@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,6 +31,9 @@ func TestClientPersistenceLifecycle(t *testing.T) {
 	if created.ID == "" || created.Name != "Acme" || !created.Enabled {
 		t.Fatalf("created client = %#v, want generated id, name, enabled", created)
 	}
+	if !strings.HasPrefix(created.SubscriptionToken, "sub_") {
+		t.Fatalf("subscription token = %q, want sub_ prefix", created.SubscriptionToken)
+	}
 	if created.QuotaState != clients.QuotaWithinLimit || created.ExpiryState != clients.ExpiryActive {
 		t.Fatalf("states = %s/%s, want within_limit/active", created.QuotaState, created.ExpiryState)
 	}
@@ -40,6 +44,9 @@ func TestClientPersistenceLifecycle(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].ID != created.ID {
 		t.Fatalf("listed clients = %#v, want created client", listed)
+	}
+	if listed[0].SubscriptionToken != created.SubscriptionToken {
+		t.Fatalf("listed subscription token = %q, want %q", listed[0].SubscriptionToken, created.SubscriptionToken)
 	}
 
 	disabled := false
@@ -56,6 +63,27 @@ func TestClientPersistenceLifecycle(t *testing.T) {
 	}
 	if _, err := clients.GetClient(ctx, db, created.ID); err != clients.ErrNotFound {
 		t.Fatalf("GetClient after delete error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestNewClientsReceiveUniqueSubscriptionTokens(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+
+	first, err := clients.CreateClient(ctx, db, clients.ClientInput{Name: "First"})
+	if err != nil {
+		t.Fatalf("CreateClient first returned error: %v", err)
+	}
+	second, err := clients.CreateClient(ctx, db, clients.ClientInput{Name: "Second"})
+	if err != nil {
+		t.Fatalf("CreateClient second returned error: %v", err)
+	}
+
+	if first.SubscriptionToken == "" || second.SubscriptionToken == "" {
+		t.Fatalf("tokens = %q/%q, want generated tokens", first.SubscriptionToken, second.SubscriptionToken)
+	}
+	if first.SubscriptionToken == second.SubscriptionToken {
+		t.Fatalf("tokens are not unique: %q", first.SubscriptionToken)
 	}
 }
 
@@ -209,6 +237,7 @@ func TestTransportPayloadValidationAndDefaults(t *testing.T) {
 		"vp8 validates":   {"vp8channel", `{"fps":30,"batch_size":32}`, `{"batch_size":32,"fps":30}`, false},
 		"sei defaults":    {"seichannel", "", `{"ack_timeout_ms":2000,"batch_size":64,"fps":60,"fragment_size":900}`, false},
 		"video defaults":  {"videochannel", "", `{"bitrate":"5000k","codec":"qrcode","fps":60,"height":1080,"hw":"none","qr_recovery":"low","qr_size":0,"width":1080}`, false},
+		"video official":  {"videochannel", `{"codec":"tile","width":720,"height":720,"fps":30,"bitrate":"2M","hw":"nvenc","qr_recovery":"highest","qr_size":128,"tile_module":8,"tile_rs":20}`, `{"bitrate":"2M","codec":"tile","fps":30,"height":720,"hw":"nvenc","qr_recovery":"highest","qr_size":128,"tile_module":8,"tile_rs":20,"width":720}`, false},
 		"video bad codec": {"videochannel", `{"codec":"h264"}`, "", true},
 		"invalid json":    {"vp8channel", `{`, "", true},
 		"unknown payload": {"unknown", "", "", true},
@@ -266,6 +295,34 @@ func TestRotateClientLocationsRotatesKeysAndOptionalRooms(t *testing.T) {
 	}
 	if rotatedRooms[0].RoomID == rotatedKeys[0].RoomID {
 		t.Fatal("room did not change during room rotation")
+	}
+}
+
+func TestRotateClientSubscriptionTokenChangesTokenWithoutRotatingLocations(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	client, err := clients.CreateClient(ctx, db, clients.ClientInput{Name: "Client"})
+	if err != nil {
+		t.Fatalf("CreateClient returned error: %v", err)
+	}
+	location, err := clients.CreateLocation(ctx, db, client.ID, clients.LocationInput{Name: "Main", Provider: "wbstream", Transport: "datachannel"})
+	if err != nil {
+		t.Fatalf("CreateLocation returned error: %v", err)
+	}
+
+	rotated, err := clients.RotateClientSubscriptionToken(ctx, db, client.ID)
+	if err != nil {
+		t.Fatalf("RotateClientSubscriptionToken returned error: %v", err)
+	}
+	if rotated.SubscriptionToken == "" || rotated.SubscriptionToken == client.SubscriptionToken {
+		t.Fatalf("rotated token = %q, original %q", rotated.SubscriptionToken, client.SubscriptionToken)
+	}
+	unchanged, err := clients.GetLocation(ctx, db, client.ID, location.ID)
+	if err != nil {
+		t.Fatalf("GetLocation returned error: %v", err)
+	}
+	if unchanged.RoomID != location.RoomID || unchanged.CryptoKey != location.CryptoKey {
+		t.Fatalf("location after subscription rotation = %#v, want unchanged room/key", unchanged)
 	}
 }
 

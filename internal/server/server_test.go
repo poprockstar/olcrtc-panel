@@ -15,6 +15,7 @@ import (
 	"testing/fstest"
 
 	"olcpanel/internal/auth"
+	"olcpanel/internal/clients"
 	"olcpanel/internal/config"
 	"olcpanel/internal/server"
 	"olcpanel/internal/storage"
@@ -693,6 +694,123 @@ func TestClientLocationValidationDeleteCascadeAndRotate(t *testing.T) {
 	}
 }
 
+func TestSubscriptionTokenEndpointServesPlaintextWithoutAdminAuth(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	client := seedSubscriptionClient(t, db, true, true)
+
+	req := httptest.NewRequest(http.MethodGet, "/sub/"+client.SubscriptionToken, nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "text/plain; charset=utf-8" {
+		t.Fatalf("Content-Type = %q, want text/plain; charset=utf-8", got)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "#name: Client") || !strings.Contains(body, "olcrtc://wbstream?datachannel@") {
+		t.Fatalf("subscription body = %q, want metadata and olcrtc URI", body)
+	}
+}
+
+func TestSubscriptionTokenRotationInvalidatesOldToken(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	cookies, csrf := loginSession(t, handler)
+	client := seedSubscriptionClient(t, db, true, true)
+	oldToken := client.SubscriptionToken
+
+	rotateReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+client.ID+"/rotate", bytes.NewBufferString(`{"rotate_subscription_token":true}`))
+	rotateReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		rotateReq.AddCookie(cookie)
+	}
+	rotateRec := httptest.NewRecorder()
+	handler.ServeHTTP(rotateRec, rotateReq)
+	if rotateRec.Code != http.StatusOK {
+		t.Fatalf("rotate status = %d, want %d, body: %s", rotateRec.Code, http.StatusOK, rotateRec.Body.String())
+	}
+
+	oldReq := httptest.NewRequest(http.MethodGet, "/sub/"+oldToken, nil)
+	oldRec := httptest.NewRecorder()
+	handler.ServeHTTP(oldRec, oldReq)
+	if oldRec.Code != http.StatusNotFound {
+		t.Fatalf("old token status = %d, want %d", oldRec.Code, http.StatusNotFound)
+	}
+	rotated, err := clients.GetClient(context.Background(), db, client.ID)
+	if err != nil {
+		t.Fatalf("GetClient returned error: %v", err)
+	}
+	newReq := httptest.NewRequest(http.MethodGet, "/sub/"+rotated.SubscriptionToken, nil)
+	newRec := httptest.NewRecorder()
+	handler.ServeHTTP(newRec, newReq)
+	if newRec.Code != http.StatusOK {
+		t.Fatalf("new token status = %d, want %d, body: %s", newRec.Code, http.StatusOK, newRec.Body.String())
+	}
+}
+
+func TestPublicClientEndpointIsOptIn(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	client := seedSubscriptionClient(t, db, true, true)
+
+	disabledReq := httptest.NewRequest(http.MethodGet, "/c/"+client.ID, nil)
+	disabledRec := httptest.NewRecorder()
+	handler.ServeHTTP(disabledRec, disabledReq)
+	if disabledRec.Code != http.StatusNotFound {
+		t.Fatalf("disabled public client status = %d, want %d", disabledRec.Code, http.StatusNotFound)
+	}
+
+	if err := storage.PutSettings(context.Background(), db, storage.Settings{
+		UILocale:                    "en",
+		PublicClientEndpointEnabled: true,
+		BackupPath:                  "/var/lib/olcpanel/backups",
+		QuotaLockMode:               "stop",
+	}); err != nil {
+		t.Fatalf("PutSettings returned error: %v", err)
+	}
+
+	enabledReq := httptest.NewRequest(http.MethodGet, "/c/"+client.ID, nil)
+	enabledRec := httptest.NewRecorder()
+	handler.ServeHTTP(enabledRec, enabledReq)
+	if enabledRec.Code != http.StatusOK {
+		t.Fatalf("enabled public client status = %d, want %d, body: %s", enabledRec.Code, http.StatusOK, enabledRec.Body.String())
+	}
+	if !strings.Contains(enabledRec.Body.String(), "#name: Client") {
+		t.Fatalf("body = %q, want subscription plaintext", enabledRec.Body.String())
+	}
+}
+
+func TestSubscriptionEndpointsReturnNotFoundForInvalidOrUnavailableClients(t *testing.T) {
+	for name, tc := range map[string]struct {
+		clientEnabled   bool
+		locationEnabled bool
+		path            func(clients.Client) string
+	}{
+		"unknown token": {clientEnabled: true, locationEnabled: true, path: func(clients.Client) string { return "/sub/sub_missing" }},
+		"disabled client": {clientEnabled: false, locationEnabled: true, path: func(client clients.Client) string {
+			return "/sub/" + client.SubscriptionToken
+		}},
+		"no enabled locations": {clientEnabled: true, locationEnabled: false, path: func(client clients.Client) string {
+			return "/sub/" + client.SubscriptionToken
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := testDB(t)
+			handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+			client := seedSubscriptionClient(t, db, tc.clientEnabled, tc.locationEnabled)
+
+			req := httptest.NewRequest(http.MethodGet, tc.path(client), nil)
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusNotFound, rec.Body.String())
+			}
+		})
+	}
+}
+
 func loginSession(t *testing.T, handler http.Handler) ([]*http.Cookie, string) {
 	t.Helper()
 	setupReq := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","password":"correct horse battery"}`))
@@ -752,6 +870,27 @@ func createClientViaSession(t *testing.T, handler http.Handler, cookies []*http.
 		t.Fatalf("client response is not JSON: %v", err)
 	}
 	return created.ID
+}
+
+func seedSubscriptionClient(t *testing.T, db *sql.DB, clientEnabled, locationEnabled bool) clients.Client {
+	t.Helper()
+	ctx := context.Background()
+	client, err := clients.CreateClient(ctx, db, clients.ClientInput{
+		Name:    "Client",
+		Enabled: &clientEnabled,
+	})
+	if err != nil {
+		t.Fatalf("CreateClient returned error: %v", err)
+	}
+	if _, err := clients.CreateLocation(ctx, db, client.ID, clients.LocationInput{
+		Name:      "Main",
+		Enabled:   &locationEnabled,
+		Provider:  "wbstream",
+		Transport: "datachannel",
+	}); err != nil {
+		t.Fatalf("CreateLocation returned error: %v", err)
+	}
+	return client
 }
 
 func testAssets() fs.FS {

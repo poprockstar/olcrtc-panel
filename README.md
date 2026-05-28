@@ -113,3 +113,33 @@ API keys can authenticate protected admin APIs without CSRF:
 curl -H "Authorization: Bearer $OLCPANEL_API_TOKEN" \
   http://127.0.0.1:8888/api/v1/settings
 ```
+
+## Clients And Subscriptions
+
+Authenticated client responses include a private `subscription_token`. New
+clients receive a generated `sub_...` token, and `GET /sub/{token}` serves that
+client's enabled locations as `text/plain; charset=utf-8` using the official
+`olcrtc://` subscription format:
+
+```bash
+curl -H "Authorization: Bearer $OLCPANEL_API_TOKEN" \
+  -X POST http://127.0.0.1:8888/api/v1/clients \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Client"}'
+
+curl http://127.0.0.1:8888/sub/sub_example_private_token
+```
+
+Rotate a private subscription token without rotating location rooms:
+
+```bash
+curl -b cookies.txt -X POST http://127.0.0.1:8888/api/v1/clients/cl_example/rotate \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF_TOKEN" \
+  -d '{"rotate_subscription_token":true}'
+```
+
+After rotation, the old `/sub/{token}` URL returns `404`. The legacy
+`/c/{client_id}` plaintext endpoint is disabled by default and only serves the
+same subscription document when `public_client_endpoint_enabled` is set to
+`true`.
