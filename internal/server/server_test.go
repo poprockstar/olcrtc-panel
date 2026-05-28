@@ -392,6 +392,230 @@ func TestPutSettingsRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestClientsRoutesRequireSetupAndAuthentication(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+
+	beforeReq := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	beforeRec := httptest.NewRecorder()
+	handler.ServeHTTP(beforeRec, beforeReq)
+	if beforeRec.Code != http.StatusForbidden {
+		t.Fatalf("before setup status = %d, want %d", beforeRec.Code, http.StatusForbidden)
+	}
+
+	if _, err := auth.CreateFirstAdmin(context.Background(), db, "admin", "correct horse battery"); err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+	afterReq := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	afterRec := httptest.NewRecorder()
+	handler.ServeHTTP(afterRec, afterReq)
+	if afterRec.Code != http.StatusUnauthorized {
+		t.Fatalf("after setup unauthenticated status = %d, want %d", afterRec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestSessionClientMutationsRequireCSRF(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	cookies, csrf := loginSession(t, handler)
+
+	body := `{"name":"Client"}`
+	withoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients", bytes.NewBufferString(body))
+	for _, cookie := range cookies {
+		withoutReq.AddCookie(cookie)
+	}
+	withoutRec := httptest.NewRecorder()
+	handler.ServeHTTP(withoutRec, withoutReq)
+	if withoutRec.Code != http.StatusForbidden {
+		t.Fatalf("without csrf status = %d, want %d", withoutRec.Code, http.StatusForbidden)
+	}
+
+	withReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients", bytes.NewBufferString(body))
+	withReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		withReq.AddCookie(cookie)
+	}
+	withRec := httptest.NewRecorder()
+	handler.ServeHTTP(withRec, withReq)
+	if withRec.Code != http.StatusOK {
+		t.Fatalf("with csrf status = %d, want %d, body: %s", withRec.Code, http.StatusOK, withRec.Body.String())
+	}
+}
+
+func TestAPIKeyCanManageClientsAndLocationsWithoutCSRF(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	token := createAPIKey(t, handler)
+
+	createClientReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients", bytes.NewBufferString(`{"name":"Client","quota_bytes":2048}`))
+	createClientReq.Header.Set("Authorization", "Bearer "+token)
+	createClientRec := httptest.NewRecorder()
+	handler.ServeHTTP(createClientRec, createClientReq)
+	if createClientRec.Code != http.StatusOK {
+		t.Fatalf("create client status = %d, want %d, body: %s", createClientRec.Code, http.StatusOK, createClientRec.Body.String())
+	}
+	var client struct {
+		ID             string `json:"id"`
+		Name           string `json:"name"`
+		Enabled        bool   `json:"enabled"`
+		QuotaState     string `json:"quota_state"`
+		LocationsCount int    `json:"locations_count"`
+	}
+	if err := json.Unmarshal(createClientRec.Body.Bytes(), &client); err != nil {
+		t.Fatalf("client response is not JSON: %v", err)
+	}
+	if client.ID == "" || client.Name != "Client" || !client.Enabled || client.QuotaState != "within_limit" {
+		t.Fatalf("client = %#v, want created client defaults", client)
+	}
+
+	createLocationReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+client.ID+"/locations", bytes.NewBufferString(`{"name":"Main","provider":"wbstream","transport":"datachannel"}`))
+	createLocationReq.Header.Set("Authorization", "Bearer "+token)
+	createLocationRec := httptest.NewRecorder()
+	handler.ServeHTTP(createLocationRec, createLocationReq)
+	if createLocationRec.Code != http.StatusOK {
+		t.Fatalf("create location status = %d, want %d, body: %s", createLocationRec.Code, http.StatusOK, createLocationRec.Body.String())
+	}
+	var location struct {
+		ID                 string          `json:"id"`
+		Provider           string          `json:"provider"`
+		Transport          string          `json:"transport"`
+		TransportStability string          `json:"transport_stability"`
+		RoomID             string          `json:"room_id"`
+		CryptoKey          string          `json:"crypto_key"`
+		TransportPayload   json.RawMessage `json:"transport_payload"`
+		DNS                string          `json:"dns"`
+	}
+	if err := json.Unmarshal(createLocationRec.Body.Bytes(), &location); err != nil {
+		t.Fatalf("location response is not JSON: %v", err)
+	}
+	if location.ID == "" || location.Provider != "wbstream" || location.Transport != "datachannel" || location.TransportStability != "stable" || location.RoomID == "" || len(location.CryptoKey) != 64 || string(location.TransportPayload) != `{}` || location.DNS != "8.8.8.8:53" {
+		t.Fatalf("location = %#v, want generated location defaults", location)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	listReq.Header.Set("Authorization", "Bearer "+token)
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list status = %d, want %d", listRec.Code, http.StatusOK)
+	}
+	var clients []struct {
+		ID             string `json:"id"`
+		LocationsCount int    `json:"locations_count"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &clients); err != nil {
+		t.Fatalf("list response is not JSON: %v", err)
+	}
+	if len(clients) != 1 || clients[0].ID != client.ID || clients[0].LocationsCount != 1 {
+		t.Fatalf("clients = %#v, want one client with one location", clients)
+	}
+}
+
+func TestClientLocationValidationDeleteCascadeAndRotate(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	cookies, csrf := loginSession(t, handler)
+
+	clientID := createClientViaSession(t, handler, cookies, csrf, `{"name":"Client"}`)
+
+	invalidReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+clientID+"/locations", bytes.NewBufferString(`{"name":"Bad","provider":"telemost","transport":"datachannel"}`))
+	invalidReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		invalidReq.AddCookie(cookie)
+	}
+	invalidRec := httptest.NewRecorder()
+	handler.ServeHTTP(invalidRec, invalidReq)
+	if invalidRec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid location status = %d, want %d", invalidRec.Code, http.StatusBadRequest)
+	}
+
+	createLocationReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+clientID+"/locations", bytes.NewBufferString(`{"name":"Main","provider":"jitsi","transport":"datachannel"}`))
+	createLocationReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		createLocationReq.AddCookie(cookie)
+	}
+	createLocationRec := httptest.NewRecorder()
+	handler.ServeHTTP(createLocationRec, createLocationReq)
+	if createLocationRec.Code != http.StatusOK {
+		t.Fatalf("create location status = %d, want %d, body: %s", createLocationRec.Code, http.StatusOK, createLocationRec.Body.String())
+	}
+	var original struct {
+		ID                 string `json:"id"`
+		TransportStability string `json:"transport_stability"`
+		RoomID             string `json:"room_id"`
+		CryptoKey          string `json:"crypto_key"`
+	}
+	if err := json.Unmarshal(createLocationRec.Body.Bytes(), &original); err != nil {
+		t.Fatalf("location response is not JSON: %v", err)
+	}
+	if original.TransportStability != "unstable" {
+		t.Fatalf("stability = %q, want unstable", original.TransportStability)
+	}
+
+	rotateKeysReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+clientID+"/rotate", bytes.NewBufferString(`{}`))
+	rotateKeysReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		rotateKeysReq.AddCookie(cookie)
+	}
+	rotateKeysRec := httptest.NewRecorder()
+	handler.ServeHTTP(rotateKeysRec, rotateKeysReq)
+	if rotateKeysRec.Code != http.StatusOK {
+		t.Fatalf("rotate keys status = %d, want %d, body: %s", rotateKeysRec.Code, http.StatusOK, rotateKeysRec.Body.String())
+	}
+	var keyRotation []struct {
+		RoomID    string `json:"room_id"`
+		CryptoKey string `json:"crypto_key"`
+	}
+	if err := json.Unmarshal(rotateKeysRec.Body.Bytes(), &keyRotation); err != nil {
+		t.Fatalf("rotate keys response is not JSON: %v", err)
+	}
+	if keyRotation[0].CryptoKey == original.CryptoKey || keyRotation[0].RoomID != original.RoomID {
+		t.Fatalf("key rotation = %#v, want changed key and same room", keyRotation)
+	}
+
+	rotateRoomsReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+clientID+"/rotate", bytes.NewBufferString(`{"rotate_rooms":true}`))
+	rotateRoomsReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		rotateRoomsReq.AddCookie(cookie)
+	}
+	rotateRoomsRec := httptest.NewRecorder()
+	handler.ServeHTTP(rotateRoomsRec, rotateRoomsReq)
+	if rotateRoomsRec.Code != http.StatusOK {
+		t.Fatalf("rotate rooms status = %d, want %d, body: %s", rotateRoomsRec.Code, http.StatusOK, rotateRoomsRec.Body.String())
+	}
+	var roomRotation []struct {
+		RoomID    string `json:"room_id"`
+		CryptoKey string `json:"crypto_key"`
+	}
+	if err := json.Unmarshal(rotateRoomsRec.Body.Bytes(), &roomRotation); err != nil {
+		t.Fatalf("rotate rooms response is not JSON: %v", err)
+	}
+	if roomRotation[0].CryptoKey == keyRotation[0].CryptoKey || roomRotation[0].RoomID == keyRotation[0].RoomID {
+		t.Fatalf("room rotation = %#v, want changed key and changed room", roomRotation)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/clients/"+clientID, nil)
+	deleteReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		deleteReq.AddCookie(cookie)
+	}
+	deleteRec := httptest.NewRecorder()
+	handler.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusNoContent {
+		t.Fatalf("delete client status = %d, want %d, body: %s", deleteRec.Code, http.StatusNoContent, deleteRec.Body.String())
+	}
+
+	listLocationsReq := httptest.NewRequest(http.MethodGet, "/api/v1/clients/"+clientID+"/locations", nil)
+	for _, cookie := range cookies {
+		listLocationsReq.AddCookie(cookie)
+	}
+	listLocationsRec := httptest.NewRecorder()
+	handler.ServeHTTP(listLocationsRec, listLocationsReq)
+	if listLocationsRec.Code != http.StatusNotFound {
+		t.Fatalf("locations after client delete status = %d, want %d", listLocationsRec.Code, http.StatusNotFound)
+	}
+}
+
 func loginSession(t *testing.T, handler http.Handler) ([]*http.Cookie, string) {
 	t.Helper()
 	setupReq := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","password":"correct horse battery"}`))
@@ -408,6 +632,49 @@ func loginSession(t *testing.T, handler http.Handler) ([]*http.Cookie, string) {
 		t.Fatalf("setup response is not JSON: %v", err)
 	}
 	return setupRec.Result().Cookies(), body.CSRFToken
+}
+
+func createAPIKey(t *testing.T, handler http.Handler) string {
+	t.Helper()
+	cookies, csrf := loginSession(t, handler)
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", bytes.NewBufferString(`{"name":"automation"}`))
+	createReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		createReq.AddCookie(cookie)
+	}
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create key status = %d, want %d, body: %s", createRec.Code, http.StatusOK, createRec.Body.String())
+	}
+	var body struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("create key response is not JSON: %v", err)
+	}
+	return body.Token
+}
+
+func createClientViaSession(t *testing.T, handler http.Handler, cookies []*http.Cookie, csrf string, body string) string {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/clients", bytes.NewBufferString(body))
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("create client status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("client response is not JSON: %v", err)
+	}
+	return created.ID
 }
 
 func testAssets() fs.FS {

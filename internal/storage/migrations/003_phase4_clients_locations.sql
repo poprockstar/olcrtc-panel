@@ -1,0 +1,15 @@
+ALTER TABLE clients ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE clients ADD COLUMN expires_at TEXT;
+ALTER TABLE clients ADD COLUMN quota_bytes INTEGER;
+ALTER TABLE clients ADD COLUMN quota_used_bytes INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE locations ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE locations ADD COLUMN provider TEXT NOT NULL DEFAULT '';
+ALTER TABLE locations ADD COLUMN transport TEXT NOT NULL DEFAULT '';
+ALTER TABLE locations ADD COLUMN room_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE locations ADD COLUMN crypto_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE locations ADD COLUMN transport_payload TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE locations ADD COLUMN dns TEXT NOT NULL DEFAULT '8.8.8.8:53';
+
+CREATE INDEX IF NOT EXISTS idx_clients_node_id ON clients(node_id);
+CREATE INDEX IF NOT EXISTS idx_locations_client_id ON locations(client_id);

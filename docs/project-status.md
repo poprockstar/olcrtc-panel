@@ -13,13 +13,14 @@ Last updated: 2026-05-27
 
 ## Phase State
 
-- Current phase: Phase 4 - Clients And Locations Domain API
+- Current phase: Phase 5 - Subscription Rendering
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
   - Phase 2 - Storage, Migrations, And Settings
   - Phase 3 - Auth And Security Baseline
-- Next session target: start Phase 4 client and location domain APIs
+  - Phase 4 - Clients And Locations Domain API
+- Next session target: start Phase 5 subscription rendering with private subscription tokens and `olcrtc://` output.
 
 ## Implemented Capabilities
 
@@ -60,6 +61,14 @@ Last updated: 2026-05-27
 - Session cookies are `HttpOnly`, `SameSite=Lax`, path `/`, and set `Secure` for HTTPS or `X-Forwarded-Proto: https`.
 - Unsafe browser requests with an `Origin` header are checked against same-origin before CSRF-protected mutations.
 - README updated with first-run setup, login, session CSRF, and API-key examples.
+- `internal/clients` domain package added with client/location models, SQLite persistence, validation, generated record IDs, generated 64-character hex crypto keys, generated room IDs, derived quota/expiry states, and per-location runtime status placeholders.
+- Schema migration version 3 adds Phase 4 fields for clients (`enabled`, `expires_at`, `quota_bytes`, `quota_used_bytes`) and locations (`enabled`, `provider`, `transport`, `room_id`, `crypto_key`, `transport_payload`, `dns`).
+- Authenticated client APIs added under `/api/v1/clients`: list, create, read, update, delete, and rotate.
+- Authenticated location APIs added under `/api/v1/clients/{id}/locations`: list, create, update, and delete.
+- Browser session mutations for clients, locations, and rotation require CSRF; API-key requests continue to bypass CSRF.
+- OlcRTC provider/transport validation added for Phase 4 presets: `telemost`, `wbstream`, and `jitsi`; stable and unstable transports are accepted, unsupported combinations are rejected.
+- `transport_payload` is normalized and returned as JSON for `datachannel`, `vp8channel`, `seichannel`, and `videochannel`; `datachannel` requires an empty object.
+- `POST /api/v1/clients/{id}/rotate` rotates crypto keys by default and rotates stored room IDs when `rotate_rooms` is true.
 
 ## Phase 0 Architecture Review Notes
 
@@ -104,6 +113,16 @@ Last updated: 2026-05-27
 - Rate limiting status: setup attempts, login failures, and repeated failed API-key auth are limited in memory for the v1 local-node deployment.
 - Frontend auth UI remains deferred to Phase 11.
 
+## Phase 4 Completion Notes
+
+- Schema version: `3` (`003_phase4_clients_locations.sql`).
+- Client API status: `GET/POST /api/v1/clients`, `GET/PUT/DELETE /api/v1/clients/{id}`, and `POST /api/v1/clients/{id}/rotate` are implemented.
+- Location API status: `GET/POST /api/v1/clients/{id}/locations` and `PUT/DELETE /api/v1/clients/{id}/locations/{location_id}` are implemented.
+- Client response fields include enabled state, optional expiry/quota, used quota, derived quota/expiry states, location count, and timestamps.
+- Location response fields include enabled state, provider, transport, transport stability, room ID, crypto key, normalized transport payload, DNS, runtime status, and timestamps.
+- Runtime enforcement for disabled, expired, and quota-exceeded states remains deferred to later supervisor/accounting phases.
+- No frontend operator UI was added in Phase 4; direct API usage remains the management path until Phase 11.
+
 ## Dependency Update Notes
 
 - No API, route, database schema, CLI, or intended UI behavior changes were made.
@@ -145,12 +164,19 @@ Last updated: 2026-05-27
   - `npm --prefix frontend run build` passed.
   - `go build -o bin/olcpanel.exe ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+- Phase 4:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin\olcpanel.exe .\cmd\olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
 
 ## Open Risks And Blockers
 
 - SQLite is the only Phase 2 runtime-verified database. PostgreSQL URLs are recognized, but PostgreSQL driver/runtime support remains a future implementation task.
 - Phase 3 rate limiting is in-memory and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
-- Frontend auth/setup/login screens are not implemented yet; operators must use direct API calls until Phase 11.
+- Frontend auth/setup/login and client/location screens are not implemented yet; operators must use direct API calls until Phase 11.
+- Phase 4 stores disabled, expiry, and quota fields and reports derived states, but runtime enforcement is intentionally deferred.
+- Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
 - Current verification ran from Windows, but production assumptions and later e2e tests must target Linux servers.
 - Linux netns/veth/tc/root tests will require an isolated Linux environment and must stay separate from normal unit tests.
 - The updated Go dependency set now records `go 1.25.0`; future environments need a compatible Go toolchain.

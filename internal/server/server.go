@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"olcpanel/internal/auth"
+	"olcpanel/internal/clients"
 	"olcpanel/internal/config"
 	"olcpanel/internal/storage"
 )
@@ -196,6 +197,178 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 		writeJSON(w, settings)
 	})
 
+	mux.HandleFunc("GET /api/v1/clients", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, false); !ok {
+			return
+		}
+		result, err := clients.ListClients(r.Context(), deps.db)
+		if err != nil {
+			http.Error(w, "failed to list clients", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, result)
+	})
+
+	mux.HandleFunc("POST /api/v1/clients", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		var input clients.ClientInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		client, err := clients.CreateClient(r.Context(), deps.db, input)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, client)
+	})
+
+	mux.HandleFunc("GET /api/v1/clients/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, false); !ok {
+			return
+		}
+		client, err := clients.GetClient(r.Context(), deps.db, r.PathValue("id"))
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "client not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to read client", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, client)
+	})
+
+	mux.HandleFunc("PUT /api/v1/clients/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		var input clients.ClientInput
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		client, err := clients.UpdateClient(r.Context(), deps.db, r.PathValue("id"), input)
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "client not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, client)
+	})
+
+	mux.HandleFunc("DELETE /api/v1/clients/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		err := clients.DeleteClient(r.Context(), deps.db, r.PathValue("id"))
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "client not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to delete client", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("GET /api/v1/clients/{id}/locations", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, false); !ok {
+			return
+		}
+		result, err := clients.ListLocations(r.Context(), deps.db, r.PathValue("id"))
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "client not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to list locations", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, result)
+	})
+
+	mux.HandleFunc("POST /api/v1/clients/{id}/locations", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		input, ok := decodeLocationInput(w, r)
+		if !ok {
+			return
+		}
+		location, err := clients.CreateLocation(r.Context(), deps.db, r.PathValue("id"), input)
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "client not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, location)
+	})
+
+	mux.HandleFunc("PUT /api/v1/clients/{id}/locations/{location_id}", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		input, ok := decodeLocationInput(w, r)
+		if !ok {
+			return
+		}
+		location, err := clients.UpdateLocation(r.Context(), deps.db, r.PathValue("id"), r.PathValue("location_id"), input)
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "location not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, location)
+	})
+
+	mux.HandleFunc("DELETE /api/v1/clients/{id}/locations/{location_id}", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		err := clients.DeleteLocation(r.Context(), deps.db, r.PathValue("id"), r.PathValue("location_id"))
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "location not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to delete location", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+
+	mux.HandleFunc("POST /api/v1/clients/{id}/rotate", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		var input rotateRequest
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+		locations, err := clients.RotateClientLocations(r.Context(), deps.db, r.PathValue("id"), input.RotateRooms)
+		if errors.Is(err, clients.ErrNotFound) {
+			http.Error(w, "client not found", http.StatusNotFound)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to rotate locations", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, locations)
+	})
+
 	mux.HandleFunc("GET /api/v1/api-keys", func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := deps.requireSessionAdmin(w, r, false); !ok {
 			return
@@ -288,6 +461,21 @@ type apiKeyCreateResponse struct {
 	Token string `json:"token"`
 }
 
+type locationRequest struct {
+	Name             string          `json:"name"`
+	Enabled          *bool           `json:"enabled"`
+	Provider         string          `json:"provider"`
+	Transport        string          `json:"transport"`
+	RoomID           string          `json:"room_id"`
+	CryptoKey        string          `json:"crypto_key"`
+	TransportPayload json.RawMessage `json:"transport_payload"`
+	DNS              string          `json:"dns"`
+}
+
+type rotateRequest struct {
+	RotateRooms bool `json:"rotate_rooms"`
+}
+
 type requestAuth struct {
 	session auth.Session
 	apiKey  *auth.APIKey
@@ -306,6 +494,23 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, value any) bool {
 		return false
 	}
 	return true
+}
+
+func decodeLocationInput(w http.ResponseWriter, r *http.Request) (clients.LocationInput, bool) {
+	var payload locationRequest
+	if !decodeJSON(w, r, &payload) {
+		return clients.LocationInput{}, false
+	}
+	return clients.LocationInput{
+		Name:             payload.Name,
+		Enabled:          payload.Enabled,
+		Provider:         payload.Provider,
+		Transport:        payload.Transport,
+		RoomID:           payload.RoomID,
+		CryptoKey:        payload.CryptoKey,
+		TransportPayload: strings.TrimSpace(string(payload.TransportPayload)),
+		DNS:              payload.DNS,
+	}, true
 }
 
 func (deps dependencies) requireAdmin(w http.ResponseWriter, r *http.Request, requireCSRF bool) (requestAuth, bool) {
