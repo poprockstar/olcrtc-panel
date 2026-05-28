@@ -13,7 +13,7 @@ Last updated: 2026-05-28
 
 ## Phase State
 
-- Current phase: Phase 8 - Netns, Veth, NAT, DNS, And TC complete; Phase 9 - Traffic Accounting, Quotas, And Expiry is next.
+- Current phase: Phase 9 - Traffic Accounting, Quotas, And Expiry complete; Phase 10 - Observability And Runtime Status is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -24,7 +24,8 @@ Last updated: 2026-05-28
   - Phase 6 - Supervisor And Reload Diff
   - Phase 7 - Runtime Config And Process Launch
   - Phase 8 - Netns, Veth, NAT, DNS, And TC
-- Next session target: start Phase 9 traffic accounting, quota persistence, counter reset handling, and expiry-triggered reload behavior.
+  - Phase 9 - Traffic Accounting, Quotas, And Expiry
+- Next session target: start Phase 10 observability and runtime status surfaces for traffic/runtime outcomes.
 
 ## Implemented Capabilities
 
@@ -121,6 +122,15 @@ Last updated: 2026-05-28
 - `quota_lock_mode=stop` still stops quota-exceeded locations; `quota_lock_mode=disable_traffic` keeps them process-eligible and asks netstack to bring the namespace veth down.
 - `olcpanel doctor` added as a read-only diagnostic command for required Linux commands, IPv4 forwarding, and stale OlcPanel namespaces/veths; unhealthy findings cause a nonzero exit.
 - Linux/root e2e coverage for real netns/veth/NAT/tc paths is isolated behind `go test -tags root_e2e ./internal/netstack`.
+- Runtime traffic accounting options added:
+  - `OLCPANEL_TRAFFIC_SAMPLE_INTERVAL` and `olcpanel serve --traffic-sample-interval`, default `30s`.
+- Schema migration version 6 adds `traffic_counter_state` for per-location raw veth counter baselines, last sample time, and reset counts.
+- Traffic counter lookup indexes were added for client/location/time and location/time history queries.
+- `internal/traffic` samples deterministic host veth counters derived from `netstack.NamesForLocation`, stores the first sample as a baseline, and appends later positive deltas to `traffic_counters`.
+- Counter resets or recreated veths update the stored baseline and increment `traffic_counter_state.reset_count` without subtracting usage.
+- Persisted deltas increment `clients.quota_used_bytes`, so client API and subscription quota metadata now reflect live accounting totals.
+- `olcpanel serve` starts the traffic sampler after the initial supervisor reload and stops it during server shutdown.
+- Quota-exceeded and expiry transitions detected by the sampler trigger a best-effort supervisor reload once for the transition.
 
 ## Phase 0 Architecture Review Notes
 
@@ -216,6 +226,15 @@ Last updated: 2026-05-28
 - Doctor status: `olcpanel doctor` prints human-readable findings and exits nonzero for missing commands, disabled forwarding, database read issues, and stale OlcPanel namespace/veth resources.
 - Root/e2e status: real Linux checks are present but excluded from normal unit tests with the `linux && root_e2e` build tag.
 
+## Phase 9 Completion Notes
+
+- Schema version: `6` (`006_phase9_traffic_accounting.sql`).
+- Accounting status: enabled local locations are sampled through their deterministic host veth sysfs counters; first samples establish baselines and subsequent samples persist append-only deltas.
+- Reset handling status: lower raw counters are treated as reset/recreated veth baselines, counted in `traffic_counter_state.reset_count`, and never written as negative usage.
+- Quota status: `clients.quota_used_bytes` is incremented by `rx_delta + tx_delta`, keeping admin API and subscription quota fields current.
+- Runtime enforcement status: the sampler detects quota and expiry transitions after startup and calls the supervisor reload path once per crossing so existing Phase 6/8 stop or traffic-disable behavior applies.
+- Startup status: sampling runs in the `serve` process after the initial best-effort reload, logs sample errors, and does not stop the HTTP service on sample failures.
+
 ## Review Hardening Fixes Notes
 
 - No new roadmap features were pulled forward.
@@ -300,6 +319,12 @@ Last updated: 2026-05-28
   - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
   - `go test -tags root_e2e ./internal/netstack` was not run in this Windows session; it is intentionally isolated for a Linux root/capability-enabled environment.
+- Phase 9:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+  - `go test -tags root_e2e ./internal/netstack` was not run in this Windows session; it remains a Linux/root/capability-enabled verification path.
 
 ## Open Risks And Blockers
 
@@ -314,6 +339,7 @@ Last updated: 2026-05-28
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
 - Current verification ran from Windows, but production netns/veth/tc behavior must be verified in an isolated Linux environment with `go test -tags root_e2e ./internal/netstack`.
 - `olcpanel doctor` detects stale OlcPanel namespaces/veths and required command/sysctl state, but deeper NAT/tc drift reporting may need additional hardening during Linux deployment validation.
+- Traffic accounting depends on Linux sysfs veth statistics at runtime; Windows verification covers the reader with a temporary sysfs-shaped fixture, not real kernel counters.
 - The updated Go dependency set now records `go 1.25.0`; future environments need a compatible Go toolchain.
 
 ## Architecture Compliance Checklist

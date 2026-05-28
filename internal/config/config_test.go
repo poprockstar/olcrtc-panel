@@ -1,7 +1,9 @@
 package config_test
 
 import (
+	"strings"
 	"testing"
+	"time"
 
 	"olcpanel/internal/config"
 )
@@ -64,6 +66,7 @@ func TestLoadUsesDefaultRuntimeConfig(t *testing.T) {
 
 func TestLoadUsesDefaultNetworkCIDR(t *testing.T) {
 	t.Setenv("OLCPANEL_NETWORK_CIDR", "")
+	t.Setenv("OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", "")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -72,6 +75,9 @@ func TestLoadUsesDefaultNetworkCIDR(t *testing.T) {
 
 	if cfg.NetworkCIDR != "10.255.0.0/16" {
 		t.Fatalf("NetworkCIDR = %q, want default runtime network", cfg.NetworkCIDR)
+	}
+	if cfg.TrafficSampleInterval != 30*time.Second {
+		t.Fatalf("TrafficSampleInterval = %s, want 30s", cfg.TrafficSampleInterval)
 	}
 }
 
@@ -152,5 +158,49 @@ func TestLoadAllowsNetworkCIDROverrides(t *testing.T) {
 
 	if cfg.NetworkCIDR != "10.99.0.0/16" {
 		t.Fatalf("NetworkCIDR = %q, want CLI override", cfg.NetworkCIDR)
+	}
+}
+
+func TestLoadAllowsTrafficSampleIntervalEnvOverride(t *testing.T) {
+	t.Setenv("OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", "45s")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.TrafficSampleInterval != 45*time.Second {
+		t.Fatalf("TrafficSampleInterval = %s, want 45s", cfg.TrafficSampleInterval)
+	}
+}
+
+func TestLoadAllowsTrafficSampleIntervalCLIOverride(t *testing.T) {
+	t.Setenv("OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", "45s")
+
+	cfg, err := config.LoadWithOptions(config.LoadOptions{
+		TrafficSampleInterval: "2m",
+	})
+	if err != nil {
+		t.Fatalf("LoadWithOptions returned error: %v", err)
+	}
+
+	if cfg.TrafficSampleInterval != 2*time.Minute {
+		t.Fatalf("TrafficSampleInterval = %s, want 2m", cfg.TrafficSampleInterval)
+	}
+}
+
+func TestLoadRejectsInvalidTrafficSampleInterval(t *testing.T) {
+	for _, value := range []string{"soon", "0s", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", value)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("Load returned nil error, want invalid interval error")
+			}
+			if !strings.Contains(err.Error(), "traffic sample interval") {
+				t.Fatalf("error = %q, want traffic sample interval context", err.Error())
+			}
+		})
 	}
 }

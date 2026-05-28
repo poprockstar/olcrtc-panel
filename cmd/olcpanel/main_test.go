@@ -20,12 +20,22 @@ func TestServeRejectsUnexpectedArgument(t *testing.T) {
 	}
 }
 
-func TestUsageIncludesDoctorAndNetworkCIDR(t *testing.T) {
+func TestUsageIncludesDoctorNetworkCIDRAndTrafficSampleInterval(t *testing.T) {
 	usage := commandUsage()
-	for _, want := range []string{"olcpanel doctor", "--network-cidr", "OLCPANEL_NETWORK_CIDR"} {
+	for _, want := range []string{"olcpanel doctor", "--network-cidr", "OLCPANEL_NETWORK_CIDR", "--traffic-sample-interval", "OLCPANEL_TRAFFIC_SAMPLE_INTERVAL"} {
 		if !strings.Contains(usage, want) {
 			t.Fatalf("usage does not contain %q:\n%s", want, usage)
 		}
+	}
+}
+
+func TestServeRejectsInvalidTrafficSampleInterval(t *testing.T) {
+	err := run([]string{"serve", "--traffic-sample-interval", "0s"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "traffic sample interval") {
+		t.Fatalf("expected traffic sample interval error, got %q", err.Error())
 	}
 }
 

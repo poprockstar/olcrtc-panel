@@ -17,6 +17,7 @@ import (
 	"olcpanel/internal/server"
 	"olcpanel/internal/storage"
 	"olcpanel/internal/supervisor"
+	"olcpanel/internal/traffic"
 	"olcpanel/internal/webui"
 )
 
@@ -54,6 +55,7 @@ func serve(args []string) error {
 	runtimeDir := flags.String("runtime-dir", "", "runtime directory for generated OlcRTC configs")
 	olcrtcBinary := flags.String("olcrtc-binary", "", "OlcRTC binary path or name")
 	networkCIDR := flags.String("network-cidr", "", "runtime network CIDR for location namespaces")
+	trafficSampleInterval := flags.String("traffic-sample-interval", "", "traffic accounting sample interval")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -62,11 +64,12 @@ func serve(args []string) error {
 	}
 
 	cfg, err := config.LoadWithOptions(config.LoadOptions{
-		BindAddress:  *bind,
-		DatabaseURL:  *databaseURL,
-		RuntimeDir:   *runtimeDir,
-		OlcRTCBinary: *olcrtcBinary,
-		NetworkCIDR:  *networkCIDR,
+		BindAddress:           *bind,
+		DatabaseURL:           *databaseURL,
+		RuntimeDir:            *runtimeDir,
+		OlcRTCBinary:          *olcrtcBinary,
+		NetworkCIDR:           *networkCIDR,
+		TrafficSampleInterval: *trafficSampleInterval,
 	})
 	if err != nil {
 		return err
@@ -101,6 +104,35 @@ func serve(args []string) error {
 			"skipped", result.Summary.Skipped,
 		)
 	}
+
+	samplerCtx, stopSampler := context.WithCancel(context.Background())
+	defer stopSampler()
+	trafficSampler := traffic.NewSampler(db, traffic.SysfsCounterReader{}, traffic.Options{
+		Reload: func(ctx context.Context) error {
+			result, err := processSupervisor.Reload(ctx)
+			if err != nil {
+				return err
+			}
+			slog.Info(
+				"supervisor reload applied after traffic state transition",
+				"started", result.Summary.Started,
+				"restarted", result.Summary.Restarted,
+				"stopped", result.Summary.Stopped,
+				"unchanged", result.Summary.Unchanged,
+				"skipped", result.Summary.Skipped,
+			)
+			return nil
+		},
+	})
+	samplerDone := make(chan struct{})
+	go func() {
+		defer close(samplerDone)
+		trafficSampler.Run(samplerCtx, cfg.TrafficSampleInterval)
+	}()
+	defer func() {
+		stopSampler()
+		<-samplerDone
+	}()
 
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddress,
@@ -304,7 +336,7 @@ func commandUsage() string {
 	return `olcpanel manages a local OlcRTC VPS panel.
 
 Usage:
-  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16]
+  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16] [--traffic-sample-interval 30s]
   olcpanel migrate [--database-url sqlite:///etc/olcpanel/panel.db]
   olcpanel doctor [--database-url sqlite:///etc/olcpanel/panel.db] [--network-cidr 10.255.0.0/16]
 
@@ -314,5 +346,7 @@ Environment:
   OLCPANEL_RUNTIME_DIR    Runtime config directory. Defaults to /var/lib/olcpanel/runtime.
   OLCPANEL_OLCRTC_BINARY  OlcRTC binary path or name. Defaults to olcrtc.
   OLCPANEL_NETWORK_CIDR   Runtime network CIDR. Defaults to 10.255.0.0/16.
+  OLCPANEL_TRAFFIC_SAMPLE_INTERVAL
+                          Traffic accounting sample interval. Defaults to 30s.
 `
 }

@@ -22,6 +22,7 @@ func TestMigrateCreatesPhase2Tables(t *testing.T) {
 		"clients",
 		"locations",
 		"traffic_counters",
+		"traffic_counter_state",
 		"settings",
 		"nodes",
 		"backups",
@@ -29,6 +30,27 @@ func TestMigrateCreatesPhase2Tables(t *testing.T) {
 	} {
 		if !tableExists(t, db, table) {
 			t.Fatalf("expected table %q to exist", table)
+		}
+	}
+}
+
+func TestPhase9MigrationAddsTrafficCounterStateAndIndexes(t *testing.T) {
+	db := openMigratedSQLite(t)
+
+	if !tableExists(t, db, "traffic_counter_state") {
+		t.Fatal("traffic_counter_state table does not exist")
+	}
+	for _, column := range []string{"node_id", "location_id", "rx_bytes", "tx_bytes", "last_sampled_at", "reset_count"} {
+		if !columnExists(t, db, "traffic_counter_state", column) {
+			t.Fatalf("traffic_counter_state.%s column does not exist", column)
+		}
+	}
+	for _, index := range []string{
+		"idx_traffic_counters_client_location_time",
+		"idx_traffic_counters_location_time",
+	} {
+		if !indexExists(t, db, index) {
+			t.Fatalf("expected index %q to exist", index)
 		}
 	}
 }
@@ -246,6 +268,19 @@ func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
 		t.Fatalf("iterate table_info %s: %v", table, err)
 	}
 	return false
+}
+
+func indexExists(t *testing.T, db *sql.DB, name string) bool {
+	t.Helper()
+	var found string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&found)
+	if err == sql.ErrNoRows {
+		return false
+	}
+	if err != nil {
+		t.Fatalf("index lookup for %q failed: %v", name, err)
+	}
+	return true
 }
 
 func assertCount(t *testing.T, db *sql.DB, table string, want int) {
