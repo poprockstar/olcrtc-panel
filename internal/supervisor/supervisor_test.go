@@ -255,6 +255,30 @@ func TestReloadStopsQuotaExceededClientsWhenQuotaLockModeIsStop(t *testing.T) {
 	assertAction(t, result.Actions, location.ID, supervisor.ActionStopped, supervisor.ReasonQuotaLocked)
 }
 
+func TestReloadKeepsQuotaExceededLocationsRunningWithTrafficDisabled(t *testing.T) {
+	db := testDB(t)
+	client, location := seedClientLocation(t, db)
+	if _, err := db.ExecContext(context.Background(), `UPDATE settings SET value = 'disable_traffic' WHERE key = 'quota_lock_mode'`); err != nil {
+		t.Fatalf("set quota lock mode: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE clients SET quota_bytes = 100, quota_used_bytes = 100 WHERE id = ?`, client.ID); err != nil {
+		t.Fatalf("mark quota exceeded: %v", err)
+	}
+	runner := &recordingRunner{}
+	sup := supervisor.New(db, supervisor.WithRunner(runner), supervisor.WithClock(fixedClock()))
+
+	result, err := sup.Reload(context.Background())
+	if err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+
+	assertSummary(t, result.Summary, supervisor.Summary{Started: 1})
+	assertAction(t, result.Actions, location.ID, supervisor.ActionStarted, supervisor.ReasonNew)
+	if len(runner.started) != 1 || !runner.started[0].TrafficDisabled {
+		t.Fatalf("started states = %#v, want traffic disabled", runner.started)
+	}
+}
+
 func TestReloadSkipsInactiveLocationsThatAreNotRunning(t *testing.T) {
 	db := testDB(t)
 	client, location := seedClientLocation(t, db)
@@ -279,10 +303,12 @@ func TestReloadSkipsInactiveLocationsThatAreNotRunning(t *testing.T) {
 type recordingRunner struct {
 	calls    []string
 	statuses map[string]supervisor.ProcessStatus
+	started  []supervisor.LocationState
 }
 
 func (runner *recordingRunner) Start(_ context.Context, location supervisor.LocationState) error {
 	runner.calls = append(runner.calls, "start:"+location.LocationID)
+	runner.started = append(runner.started, location)
 	if runner.statuses != nil {
 		runner.statuses[location.LocationID] = supervisor.ProcessRunning
 	}

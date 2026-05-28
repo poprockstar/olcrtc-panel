@@ -1,6 +1,6 @@
 # OlcRTC Panel Project Status
 
-Last updated: 2026-05-27
+Last updated: 2026-05-28
 
 ## Architecture Approval
 
@@ -13,7 +13,7 @@ Last updated: 2026-05-27
 
 ## Phase State
 
-- Current phase: Phase 7 - Runtime Config And Process Launch complete; Phase 8 - Netns, Veth, NAT, DNS, And TC is next.
+- Current phase: Phase 8 - Netns, Veth, NAT, DNS, And TC complete; Phase 9 - Traffic Accounting, Quotas, And Expiry is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -23,7 +23,8 @@ Last updated: 2026-05-27
   - Phase 5 - Subscription Rendering
   - Phase 6 - Supervisor And Reload Diff
   - Phase 7 - Runtime Config And Process Launch
-- Next session target: start Phase 8 network namespace, veth, NAT, DNS, and traffic-control reconciliation.
+  - Phase 8 - Netns, Veth, NAT, DNS, And TC
+- Next session target: start Phase 9 traffic accounting, quota persistence, counter reset handling, and expiry-triggered reload behavior.
 
 ## Implemented Capabilities
 
@@ -103,6 +104,23 @@ Last updated: 2026-05-27
 - `internal/supervisor` now includes a real process runner that starts `olcrtc <server.yaml>`, restarts changed locations, stops removed or ineligible locations, and removes stopped location runtime directories.
 - Unexpected child exits are recorded as failed process status without an automatic restart loop.
 - `olcpanel serve` wires the real process runner and performs an initial best-effort supervisor reload; missing `olcrtc` prevents affected active locations from launching but does not prevent HTTP server startup.
+- Schema migration version 5 adds nullable `locations.speed_limit_bps`; `null` means unlimited and positive values enable per-location shaping.
+- Location create/update APIs now accept and return `speed_limit_bps`, rejecting zero or negative values.
+- Runtime network configuration added:
+  - `OLCPANEL_NETWORK_CIDR` and `olcpanel serve --network-cidr`, default `10.255.0.0/16`
+  - `olcpanel doctor --network-cidr` uses the same default.
+- `internal/netstack` added with deterministic resource derivation:
+  - namespace `olcp-<sha256-11hex>`
+  - host veth `olh-<sha256-11hex>`
+  - namespace veth `oln-<sha256-11hex>`
+  - deterministic per-location `/30` allocation inside the configured runtime CIDR.
+- Netstack reconciliation creates namespaces/veth pairs, assigns host and namespace IPs, brings links/routes up, writes `/etc/netns/<namespace>/resolv.conf`, enables IPv4 forwarding, maintains an `OLCPANEL-NAT` chain, and applies/removes symmetric `tc tbf` shaping.
+- Runtime DNS keeps the full `host:port` value in OlcRTC YAML while netns `resolv.conf` writes the host portion as a `nameserver`.
+- Process runner now launches active locations through `ip netns exec <namespace> <olcrtc> <server.yaml>` when netstack is configured, and cleans netstack resources plus runtime config on stop or failed start.
+- Supervisor validates active location subnet collisions before mutating runtime state.
+- `quota_lock_mode=stop` still stops quota-exceeded locations; `quota_lock_mode=disable_traffic` keeps them process-eligible and asks netstack to bring the namespace veth down.
+- `olcpanel doctor` added as a read-only diagnostic command for required Linux commands, IPv4 forwarding, and stale OlcPanel namespaces/veths; unhealthy findings cause a nonzero exit.
+- Linux/root e2e coverage for real netns/veth/NAT/tc paths is isolated behind `go test -tags root_e2e ./internal/netstack`.
 
 ## Phase 0 Architecture Review Notes
 
@@ -187,6 +205,17 @@ Last updated: 2026-05-27
 - Process runner status: fake-process tests cover start, restart, stop cleanup, and unexpected child exit without automatic restart.
 - Startup behavior status: initial reload is best-effort so a missing `olcrtc` binary is logged clearly without preventing the panel from serving admin APIs.
 
+## Phase 8 Completion Notes
+
+- Schema version: `5` (`005_phase8_location_network.sql`).
+- Network capability requirements: production netstack reconciliation requires Linux plus `CAP_NET_ADMIN` for netns/veth/tc/iptables and permission to write `/etc/netns/<namespace>/resolv.conf`; service startup also writes `net.ipv4.ip_forward=1` through `sysctl`.
+- Runtime network status: active locations are assigned deterministic `/30` subnets under the configured runtime CIDR; collisions are rejected before supervisor start/restart/stop mutations.
+- NAT status: the panel owns an `OLCPANEL-NAT` chain in the `nat` table and reconciles MASQUERADE rules for location subnets without intentional duplicates.
+- Traffic shaping status: `speed_limit_bps = null` removes qdisc state; positive values apply TBF shaping to both host and namespace veth ends.
+- Quota lock status: `stop` preserves Phase 6 stop behavior; `disable_traffic` keeps the OlcRTC process eligible while disabling the namespace veth.
+- Doctor status: `olcpanel doctor` prints human-readable findings and exits nonzero for missing commands, disabled forwarding, database read issues, and stale OlcPanel namespace/veth resources.
+- Root/e2e status: real Linux checks are present but excluded from normal unit tests with the `linux && root_e2e` build tag.
+
 ## Review Hardening Fixes Notes
 
 - No new roadmap features were pulled forward.
@@ -265,6 +294,12 @@ Last updated: 2026-05-27
   - `npm --prefix frontend run build` passed.
   - `go build -o bin\olcpanel.exe .\cmd\olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
+- Phase 8:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+  - `go test -tags root_e2e ./internal/netstack` was not run in this Windows session; it is intentionally isolated for a Linux root/capability-enabled environment.
 
 ## Open Risks And Blockers
 
@@ -274,12 +309,11 @@ Last updated: 2026-05-27
 - Real OlcRTC session verification remains a Linux deployment check; Phase 7 unit tests use fake executables to prove process lifecycle behavior.
 - Runtime process stdout/stderr currently inherit the panel service streams for systemd/journal capture; structured log APIs remain deferred to Phase 10.
 - Unexpected OlcRTC child exits are recorded internally as failed but are not surfaced through an admin API until observability work in Phase 10.
-- `quota_lock_mode=disable_traffic` remains pending netns/tc traffic-control work and does not stop locations in Phase 7.
 - Standalone CLI reload remains pending daemon IPC or HTTP-client design.
 - Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
-- Current verification ran from Windows, but production assumptions and later e2e tests must target Linux servers.
-- Linux netns/veth/tc/root tests will require an isolated Linux environment and must stay separate from normal unit tests.
+- Current verification ran from Windows, but production netns/veth/tc behavior must be verified in an isolated Linux environment with `go test -tags root_e2e ./internal/netstack`.
+- `olcpanel doctor` detects stale OlcPanel namespaces/veths and required command/sysctl state, but deeper NAT/tc drift reporting may need additional hardening during Linux deployment validation.
 - The updated Go dependency set now records `go 1.25.0`; future environments need a compatible Go toolchain.
 
 ## Architecture Compliance Checklist

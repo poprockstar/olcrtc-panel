@@ -625,6 +625,7 @@ type locationRequest struct {
 	CryptoKey        string          `json:"crypto_key"`
 	TransportPayload json.RawMessage `json:"transport_payload"`
 	DNS              string          `json:"dns"`
+	SpeedLimitBPS    *int64          `json:"speed_limit_bps"`
 }
 
 type rotateRequest struct {
@@ -682,6 +683,7 @@ func decodeLocationInput(w http.ResponseWriter, r *http.Request) (clients.Locati
 		CryptoKey:        payload.CryptoKey,
 		TransportPayload: strings.TrimSpace(string(payload.TransportPayload)),
 		DNS:              payload.DNS,
+		SpeedLimitBPS:    payload.SpeedLimitBPS,
 	}, true
 }
 

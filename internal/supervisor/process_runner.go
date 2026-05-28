@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"olcpanel/internal/netstack"
 	"olcpanel/internal/runtimeconfig"
 )
 
@@ -25,9 +26,21 @@ type ProcessRunner struct {
 	renderer   runtimeconfig.Renderer
 	runtimeDir string
 	binary     string
+	ipBinary   string
+	netstack   NetworkStack
 	mu         sync.Mutex
 	processes  map[string]*managedProcess
 	statuses   map[string]ProcessStatus
+}
+
+type NetworkStack interface {
+	Ensure(context.Context, LocationState) error
+	Cleanup(context.Context, LocationState) error
+}
+
+type ProcessRunnerOptions struct {
+	Netstack NetworkStack
+	IPBinary string
 }
 
 type managedProcess struct {
@@ -37,10 +50,20 @@ type managedProcess struct {
 }
 
 func NewProcessRunner(runtimeDir, binary string) *ProcessRunner {
+	return NewProcessRunnerWithOptions(runtimeDir, binary, ProcessRunnerOptions{})
+}
+
+func NewProcessRunnerWithOptions(runtimeDir, binary string, options ProcessRunnerOptions) *ProcessRunner {
+	ipBinary := options.IPBinary
+	if strings.TrimSpace(ipBinary) == "" {
+		ipBinary = "ip"
+	}
 	return &ProcessRunner{
 		renderer:   runtimeconfig.NewRenderer(runtimeDir),
 		runtimeDir: runtimeDir,
 		binary:     binary,
+		ipBinary:   ipBinary,
+		netstack:   options.Netstack,
 		processes:  make(map[string]*managedProcess),
 		statuses:   make(map[string]ProcessStatus),
 	}
@@ -66,15 +89,22 @@ func (runner *ProcessRunner) Start(ctx context.Context, state LocationState) err
 	if runner.hasProcess(state.LocationID) {
 		return fmt.Errorf("location %s is already running", state.LocationID)
 	}
+	if runner.netstack != nil {
+		if err := runner.netstack.Ensure(ctx, state); err != nil {
+			return fmt.Errorf("ensure network for location %s: %w", state.LocationID, err)
+		}
+	}
 	configPath, err := runner.renderer.Render(runtimeLocation(state))
 	if err != nil {
+		runner.cleanupNetwork(ctx, state)
 		return err
 	}
 
-	cmd := exec.Command(runner.binary, configPath)
+	cmd := runner.command(state, configPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
+		runner.cleanupNetwork(ctx, state)
 		return fmt.Errorf("start %s for location %s: %w", runner.binary, state.LocationID, err)
 	}
 
@@ -113,12 +143,39 @@ func (runner *ProcessRunner) Stop(ctx context.Context, state LocationState) erro
 	if err := runner.renderer.Remove(state.LocationID); err != nil {
 		return err
 	}
+	if err := runner.cleanupNetwork(ctx, state); err != nil {
+		return err
+	}
 
 	runner.mu.Lock()
 	delete(runner.processes, state.LocationID)
 	runner.statuses[state.LocationID] = ProcessStopped
 	runner.mu.Unlock()
 	return nil
+}
+
+func (runner *ProcessRunner) Validate(ctx context.Context, states []LocationState) error {
+	if validator, ok := runner.netstack.(interface {
+		Validate(context.Context, []LocationState) error
+	}); ok {
+		return validator.Validate(ctx, states)
+	}
+	return nil
+}
+
+func (runner *ProcessRunner) command(state LocationState, configPath string) *exec.Cmd {
+	if runner.netstack == nil {
+		return exec.Command(runner.binary, configPath)
+	}
+	names := netstack.NamesForLocation(state.LocationID)
+	return exec.Command(runner.ipBinary, "netns", "exec", names.Namespace, runner.binary, configPath)
+}
+
+func (runner *ProcessRunner) cleanupNetwork(ctx context.Context, state LocationState) error {
+	if runner.netstack == nil {
+		return nil
+	}
+	return runner.netstack.Cleanup(ctx, state)
 }
 
 func (runner *ProcessRunner) markStopping(locationID string) *managedProcess {

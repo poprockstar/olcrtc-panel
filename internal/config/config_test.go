@@ -62,6 +62,19 @@ func TestLoadUsesDefaultRuntimeConfig(t *testing.T) {
 	}
 }
 
+func TestLoadUsesDefaultNetworkCIDR(t *testing.T) {
+	t.Setenv("OLCPANEL_NETWORK_CIDR", "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.NetworkCIDR != "10.255.0.0/16" {
+		t.Fatalf("NetworkCIDR = %q, want default runtime network", cfg.NetworkCIDR)
+	}
+}
+
 func TestLoadAllowsDatabaseURLEnvOverride(t *testing.T) {
 	t.Setenv("OLCPANEL_DATABASE_URL", "sqlite:///tmp/olcpanel-test.db")
 
@@ -124,5 +137,20 @@ func TestLoadAllowsRuntimeCLIOverrides(t *testing.T) {
 	}
 	if cfg.OlcRTCBinary != "olcrtc-from-cli" {
 		t.Fatalf("OlcRTCBinary = %q, want CLI override", cfg.OlcRTCBinary)
+	}
+}
+
+func TestLoadAllowsNetworkCIDROverrides(t *testing.T) {
+	t.Setenv("OLCPANEL_NETWORK_CIDR", "10.88.0.0/16")
+
+	cfg, err := config.LoadWithOptions(config.LoadOptions{
+		NetworkCIDR: "10.99.0.0/16",
+	})
+	if err != nil {
+		t.Fatalf("LoadWithOptions returned error: %v", err)
+	}
+
+	if cfg.NetworkCIDR != "10.99.0.0/16" {
+		t.Fatalf("NetworkCIDR = %q, want CLI override", cfg.NetworkCIDR)
 	}
 }

@@ -120,6 +120,33 @@ func TestMigrateIsIdempotentAndSeedsDefaultsOnce(t *testing.T) {
 	}
 }
 
+func TestPhase8MigrationAddsNullableLocationSpeedLimit(t *testing.T) {
+	db := openMigratedSQLite(t)
+
+	if !columnExists(t, db, "locations", "speed_limit_bps") {
+		t.Fatal("locations.speed_limit_bps column does not exist")
+	}
+
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO clients(id, node_id, name, enabled, quota_used_bytes, subscription_token, updated_at)
+VALUES ('cl_speed', 'local', 'Speed', 1, 0, 'sub_speed', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatalf("insert client: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO locations(id, node_id, client_id, name, enabled, provider, transport, room_id, crypto_key, transport_payload, dns, updated_at)
+VALUES ('loc_speed', 'local', 'cl_speed', 'Speed', 1, 'wbstream', 'datachannel', 'room', '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef', '{}', '8.8.8.8:53', CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatalf("insert location without speed limit: %v", err)
+	}
+	var speedLimit sql.NullInt64
+	if err := db.QueryRowContext(ctx, `SELECT speed_limit_bps FROM locations WHERE id = 'loc_speed'`).Scan(&speedLimit); err != nil {
+		t.Fatalf("read speed limit: %v", err)
+	}
+	if speedLimit.Valid {
+		t.Fatalf("speed_limit_bps valid = true, want null")
+	}
+}
+
 func TestPutSettingsPersistsCoreSettings(t *testing.T) {
 	ctx := context.Background()
 	db := openMigratedSQLite(t)
@@ -193,6 +220,32 @@ func tableExists(t *testing.T, db *sql.DB, name string) bool {
 		t.Fatalf("table lookup for %q failed: %v", name, err)
 	}
 	return true
+}
+
+func columnExists(t *testing.T, db *sql.DB, table, column string) bool {
+	t.Helper()
+	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		t.Fatalf("table_info %s failed: %v", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatalf("scan table_info %s: %v", table, err)
+		}
+		if name == column {
+			return true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate table_info %s: %v", table, err)
+	}
+	return false
 }
 
 func assertCount(t *testing.T, db *sql.DB, table string, want int) {

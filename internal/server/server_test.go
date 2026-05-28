@@ -801,6 +801,57 @@ func TestClientLocationValidationDeleteCascadeAndRotate(t *testing.T) {
 	}
 }
 
+func TestLocationAPIAcceptsNullAndPositiveSpeedLimitsOnly(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	cookies, csrf := loginSession(t, handler)
+	clientID := createClientViaSession(t, handler, cookies, csrf, `{"name":"Client"}`)
+
+	create := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+clientID+"/locations", bytes.NewBufferString(body))
+		req.Header.Set("X-CSRF-Token", csrf)
+		for _, cookie := range cookies {
+			req.AddCookie(cookie)
+		}
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	nullRec := create(`{"name":"Null","provider":"wbstream","transport":"datachannel","speed_limit_bps":null}`)
+	if nullRec.Code != http.StatusOK {
+		t.Fatalf("null speed status = %d, want %d, body: %s", nullRec.Code, http.StatusOK, nullRec.Body.String())
+	}
+	var nullLocation struct {
+		SpeedLimitBPS *int64 `json:"speed_limit_bps"`
+	}
+	if err := json.Unmarshal(nullRec.Body.Bytes(), &nullLocation); err != nil {
+		t.Fatalf("null location response is not JSON: %v", err)
+	}
+	if nullLocation.SpeedLimitBPS != nil {
+		t.Fatalf("null speed response = %v, want nil", nullLocation.SpeedLimitBPS)
+	}
+
+	positiveRec := create(`{"name":"Positive","provider":"wbstream","transport":"datachannel","speed_limit_bps":12345}`)
+	if positiveRec.Code != http.StatusOK {
+		t.Fatalf("positive speed status = %d, want %d, body: %s", positiveRec.Code, http.StatusOK, positiveRec.Body.String())
+	}
+	var positiveLocation struct {
+		SpeedLimitBPS *int64 `json:"speed_limit_bps"`
+	}
+	if err := json.Unmarshal(positiveRec.Body.Bytes(), &positiveLocation); err != nil {
+		t.Fatalf("positive location response is not JSON: %v", err)
+	}
+	if positiveLocation.SpeedLimitBPS == nil || *positiveLocation.SpeedLimitBPS != 12345 {
+		t.Fatalf("positive speed response = %v, want 12345", positiveLocation.SpeedLimitBPS)
+	}
+
+	zeroRec := create(`{"name":"Zero","provider":"wbstream","transport":"datachannel","speed_limit_bps":0}`)
+	if zeroRec.Code != http.StatusBadRequest {
+		t.Fatalf("zero speed status = %d, want %d", zeroRec.Code, http.StatusBadRequest)
+	}
+}
+
 func TestSubscriptionTokenEndpointServesPlaintextWithoutAdminAuth(t *testing.T) {
 	db := testDB(t)
 	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))

@@ -20,6 +20,25 @@ func TestServeRejectsUnexpectedArgument(t *testing.T) {
 	}
 }
 
+func TestUsageIncludesDoctorAndNetworkCIDR(t *testing.T) {
+	usage := commandUsage()
+	for _, want := range []string{"olcpanel doctor", "--network-cidr", "OLCPANEL_NETWORK_CIDR"} {
+		if !strings.Contains(usage, want) {
+			t.Fatalf("usage does not contain %q:\n%s", want, usage)
+		}
+	}
+}
+
+func TestDoctorRejectsUnexpectedArgument(t *testing.T) {
+	err := run([]string{"doctor", "unexpected"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "unexpected argument") {
+		t.Fatalf("expected unexpected argument error, got %q", err.Error())
+	}
+}
+
 func TestMigrateCommandRunsMigrations(t *testing.T) {
 	databaseURL := "sqlite:///" + strings.ReplaceAll(t.TempDir(), "\\", "/") + "/panel.db"
 

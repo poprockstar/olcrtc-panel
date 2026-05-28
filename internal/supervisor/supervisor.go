@@ -66,6 +66,8 @@ type LocationState struct {
 	CryptoKey        string
 	TransportPayload string
 	DNS              string
+	SpeedLimitBPS    *int64
+	TrafficDisabled  bool
 	fingerprint      string
 }
 
@@ -140,6 +142,19 @@ func (supervisor *Supervisor) Reload(ctx context.Context) (ReloadResult, error) 
 	entries, err := loadDesired(ctx, supervisor.db, supervisor.now())
 	if err != nil {
 		return ReloadResult{}, err
+	}
+	if validator, ok := supervisor.runner.(interface {
+		Validate(context.Context, []LocationState) error
+	}); ok {
+		states := make([]LocationState, 0, len(entries))
+		for _, entry := range entries {
+			if entry.reason == "" {
+				states = append(states, entry.state)
+			}
+		}
+		if err := validator.Validate(ctx, states); err != nil {
+			return ReloadResult{}, err
+		}
 	}
 
 	supervisor.mu.Lock()
@@ -238,7 +253,7 @@ func loadDesired(ctx context.Context, db *sql.DB, now time.Time) ([]desiredEntry
 
 	rows, err := db.QueryContext(ctx, `
 SELECT
-	l.id, l.client_id, l.name, l.enabled, l.provider, l.transport, l.room_id, l.crypto_key, l.transport_payload, l.dns,
+	l.id, l.client_id, l.name, l.enabled, l.provider, l.transport, l.room_id, l.crypto_key, l.transport_payload, l.dns, l.speed_limit_bps,
 	c.enabled, c.expires_at, c.quota_bytes, c.quota_used_bytes
 FROM locations l
 JOIN clients c ON c.id = l.client_id AND c.node_id = l.node_id
@@ -255,6 +270,7 @@ ORDER BY l.created_at, l.id`, localNodeID)
 		var locationEnabled, clientEnabled int
 		var expires sql.NullString
 		var quotaBytes sql.NullInt64
+		var speedLimit sql.NullInt64
 		var quotaUsed int64
 		if err := rows.Scan(
 			&entry.state.LocationID,
@@ -267,12 +283,17 @@ ORDER BY l.created_at, l.id`, localNodeID)
 			&entry.state.CryptoKey,
 			&entry.state.TransportPayload,
 			&entry.state.DNS,
+			&speedLimit,
 			&clientEnabled,
 			&expires,
 			&quotaBytes,
 			&quotaUsed,
 		); err != nil {
 			return nil, fmt.Errorf("scan supervisor desired state: %w", err)
+		}
+		if speedLimit.Valid {
+			value := speedLimit.Int64
+			entry.state.SpeedLimitBPS = &value
 		}
 
 		switch {
@@ -284,6 +305,8 @@ ORDER BY l.created_at, l.id`, localNodeID)
 			entry.reason = ReasonExpiredClient
 		case quotaLockMode == "stop" && quotaBytes.Valid && quotaUsed >= quotaBytes.Int64:
 			entry.reason = ReasonQuotaLocked
+		case quotaLockMode == "disable_traffic" && quotaBytes.Valid && quotaUsed >= quotaBytes.Int64:
+			entry.state.TrafficDisabled = true
 		}
 		entry.state.fingerprint = fingerprint(entry.state)
 		entries = append(entries, entry)
@@ -335,6 +358,8 @@ func fingerprint(state LocationState) string {
 		CryptoKey        string `json:"crypto_key"`
 		TransportPayload string `json:"transport_payload"`
 		DNS              string `json:"dns"`
+		SpeedLimitBPS    *int64 `json:"speed_limit_bps"`
+		TrafficDisabled  bool   `json:"traffic_disabled"`
 	}{
 		LocationID:       state.LocationID,
 		ClientID:         state.ClientID,
@@ -345,6 +370,8 @@ func fingerprint(state LocationState) string {
 		CryptoKey:        state.CryptoKey,
 		TransportPayload: state.TransportPayload,
 		DNS:              state.DNS,
+		SpeedLimitBPS:    state.SpeedLimitBPS,
+		TrafficDisabled:  state.TrafficDisabled,
 	})
 	return string(data)
 }

@@ -136,9 +136,10 @@ func TestLocationPersistenceValidationAndGeneration(t *testing.T) {
 	}
 
 	location, err := clients.CreateLocation(ctx, db, client.ID, clients.LocationInput{
-		Name:      "Main",
-		Provider:  "wbstream",
-		Transport: "datachannel",
+		Name:          "Main",
+		Provider:      "wbstream",
+		Transport:     "datachannel",
+		SpeedLimitBPS: int64Ptr(2500000),
 	})
 	if err != nil {
 		t.Fatalf("CreateLocation returned error: %v", err)
@@ -154,6 +155,9 @@ func TestLocationPersistenceValidationAndGeneration(t *testing.T) {
 	}
 	if location.TransportStability != clients.TransportStable {
 		t.Fatalf("stability = %q, want stable", location.TransportStability)
+	}
+	if location.SpeedLimitBPS == nil || *location.SpeedLimitBPS != 2500000 {
+		t.Fatalf("speed limit = %v, want 2500000", location.SpeedLimitBPS)
 	}
 
 	listed, err := clients.ListLocations(ctx, db, client.ID)
@@ -178,12 +182,36 @@ func TestLocationPersistenceValidationAndGeneration(t *testing.T) {
 	if updated.Name != "Video" || updated.Enabled || updated.Transport != "videochannel" || updated.DNS != "1.1.1.1:53" {
 		t.Fatalf("updated location = %#v, want updated values", updated)
 	}
+	if updated.SpeedLimitBPS != nil {
+		t.Fatalf("updated speed limit = %v, want nil", updated.SpeedLimitBPS)
+	}
 
 	if err := clients.DeleteLocation(ctx, db, client.ID, location.ID); err != nil {
 		t.Fatalf("DeleteLocation returned error: %v", err)
 	}
 	if _, err := clients.GetLocation(ctx, db, client.ID, location.ID); err != clients.ErrNotFound {
 		t.Fatalf("GetLocation after delete error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestLocationRejectsNonPositiveSpeedLimit(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	client, err := clients.CreateClient(ctx, db, clients.ClientInput{Name: "Client"})
+	if err != nil {
+		t.Fatalf("CreateClient returned error: %v", err)
+	}
+
+	for _, speed := range []int64{0, -1} {
+		_, err := clients.CreateLocation(ctx, db, client.ID, clients.LocationInput{
+			Name:          "Main",
+			Provider:      "wbstream",
+			Transport:     "datachannel",
+			SpeedLimitBPS: &speed,
+		})
+		if err == nil {
+			t.Fatalf("CreateLocation speed %d returned nil error, want rejection", speed)
+		}
 	}
 }
 

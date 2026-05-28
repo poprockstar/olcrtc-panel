@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"olcpanel/internal/netstack"
 	"olcpanel/internal/supervisor"
 )
 
@@ -20,7 +21,11 @@ func TestMain(m *testing.M) {
 
 func TestProcessRunnerStartsChildWithGeneratedConfigPath(t *testing.T) {
 	exe := fakeExecutable(t)
-	runner := supervisor.NewProcessRunner(t.TempDir(), exe)
+	stack := &fakeStack{}
+	runner := supervisor.NewProcessRunnerWithOptions(t.TempDir(), exe, supervisor.ProcessRunnerOptions{
+		Netstack: stack,
+		IPBinary: exe,
+	})
 	state := processLocation("loc_start", "room-start")
 
 	if err := runner.Start(context.Background(), state); err != nil {
@@ -31,8 +36,13 @@ func TestProcessRunnerStartsChildWithGeneratedConfigPath(t *testing.T) {
 	configPath := filepath.Join(runner.RuntimeDir(), state.LocationID, "server.yaml")
 	waitForFile(t, configPath)
 	args := readProcessArgs(t, runner.RuntimeDir(), state.LocationID)
-	if args != configPath {
-		t.Fatalf("child args = %q, want config path %q", args, configPath)
+	names := netstack.NamesForLocation(state.LocationID)
+	wantArgs := "netns exec " + names.Namespace + " " + exe + " " + configPath
+	if args != wantArgs {
+		t.Fatalf("child args = %q, want %q", args, wantArgs)
+	}
+	if len(stack.ensureCalls) != 1 || stack.ensureCalls[0].LocationID != state.LocationID {
+		t.Fatalf("ensure calls = %#v, want location before start", stack.ensureCalls)
 	}
 }
 
@@ -67,7 +77,11 @@ func TestProcessRunnerRestartRewritesConfigAndStartsNewProcess(t *testing.T) {
 
 func TestProcessRunnerStopTerminatesProcessAndRemovesRuntimeDirectory(t *testing.T) {
 	exe := fakeExecutable(t)
-	runner := supervisor.NewProcessRunner(t.TempDir(), exe)
+	stack := &fakeStack{}
+	runner := supervisor.NewProcessRunnerWithOptions(t.TempDir(), exe, supervisor.ProcessRunnerOptions{
+		Netstack: stack,
+		IPBinary: exe,
+	})
 	state := processLocation("loc_stop", "room-stop")
 
 	if err := runner.Start(context.Background(), state); err != nil {
@@ -84,6 +98,30 @@ func TestProcessRunnerStopTerminatesProcessAndRemovesRuntimeDirectory(t *testing
 	}
 	if got := runner.Status(state.LocationID); got != supervisor.ProcessStopped {
 		t.Fatalf("status = %q, want stopped", got)
+	}
+	if len(stack.cleanupCalls) != 1 || stack.cleanupCalls[0].LocationID != state.LocationID {
+		t.Fatalf("cleanup calls = %#v, want location on stop", stack.cleanupCalls)
+	}
+}
+
+func TestProcessRunnerCleansNetworkWhenStartFailsAfterEnsure(t *testing.T) {
+	exe := fakeExecutable(t)
+	stack := &fakeStack{}
+	runner := supervisor.NewProcessRunnerWithOptions(t.TempDir(), exe, supervisor.ProcessRunnerOptions{
+		Netstack: stack,
+		IPBinary: filepath.Join(t.TempDir(), "missing-ip"),
+	})
+	state := processLocation("loc_fail", "room-fail")
+
+	err := runner.Start(context.Background(), state)
+	if err == nil {
+		t.Fatal("Start returned nil error, want start failure")
+	}
+	if len(stack.ensureCalls) != 1 {
+		t.Fatalf("ensure calls = %#v, want one ensure", stack.ensureCalls)
+	}
+	if len(stack.cleanupCalls) != 1 || stack.cleanupCalls[0].LocationID != state.LocationID {
+		t.Fatalf("cleanup calls = %#v, want cleanup after failed start", stack.cleanupCalls)
 	}
 }
 
@@ -126,7 +164,7 @@ func runFakeOlcRTC() int {
 	if len(os.Args) < 2 {
 		return 2
 	}
-	configPath := os.Args[1]
+	configPath := os.Args[len(os.Args)-1]
 	dir := filepath.Dir(configPath)
 	count := 0
 	if data, err := os.ReadFile(filepath.Join(dir, "launches.txt")); err == nil {
@@ -134,13 +172,28 @@ func runFakeOlcRTC() int {
 	}
 	count++
 	_ = os.WriteFile(filepath.Join(dir, "launches.txt"), []byte(intString(count)+"\n"), 0o644)
-	_ = os.WriteFile(filepath.Join(dir, "args.txt"), []byte(configPath+"\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "args.txt"), []byte(strings.Join(os.Args[1:], " ")+"\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "pid.txt"), []byte(intString(os.Getpid())+"\n"), 0o644)
 	data, _ := os.ReadFile(configPath)
 	if strings.Contains(string(data), `id: "room-exit"`) {
 		return 42
 	}
 	select {}
+}
+
+type fakeStack struct {
+	ensureCalls  []supervisor.LocationState
+	cleanupCalls []supervisor.LocationState
+}
+
+func (stack *fakeStack) Ensure(_ context.Context, state supervisor.LocationState) error {
+	stack.ensureCalls = append(stack.ensureCalls, state)
+	return nil
+}
+
+func (stack *fakeStack) Cleanup(_ context.Context, state supervisor.LocationState) error {
+	stack.cleanupCalls = append(stack.cleanupCalls, state)
+	return nil
 }
 
 func waitForFile(t *testing.T, path string) {

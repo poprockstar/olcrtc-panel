@@ -86,6 +86,7 @@ type Location struct {
 	CryptoKey          string             `json:"crypto_key"`
 	TransportPayload   RawPayload         `json:"transport_payload"`
 	DNS                string             `json:"dns"`
+	SpeedLimitBPS      *int64             `json:"speed_limit_bps"`
 	RuntimeStatus      string             `json:"runtime_status"`
 	CreatedAt          time.Time          `json:"created_at"`
 	UpdatedAt          time.Time          `json:"updated_at"`
@@ -100,6 +101,7 @@ type LocationInput struct {
 	CryptoKey        string `json:"crypto_key"`
 	TransportPayload string `json:"transport_payload"`
 	DNS              string `json:"dns"`
+	SpeedLimitBPS    *int64 `json:"speed_limit_bps"`
 }
 
 func CreateClient(ctx context.Context, db *sql.DB, input ClientInput) (Client, error) {
@@ -251,9 +253,9 @@ func CreateLocation(ctx context.Context, db *sql.DB, clientID string, input Loca
 		}
 	}
 	if _, err := db.ExecContext(ctx, `
-INSERT INTO locations(id, node_id, client_id, name, enabled, provider, transport, room_id, crypto_key, transport_payload, dns, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-		id, localNodeID, clientID, normalized.Name, boolInt(*normalized.Enabled), normalized.Provider, normalized.Transport, normalized.RoomID, normalized.CryptoKey, normalized.TransportPayload, normalized.DNS); err != nil {
+INSERT INTO locations(id, node_id, client_id, name, enabled, provider, transport, room_id, crypto_key, transport_payload, dns, speed_limit_bps, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
+		id, localNodeID, clientID, normalized.Name, boolInt(*normalized.Enabled), normalized.Provider, normalized.Transport, normalized.RoomID, normalized.CryptoKey, normalized.TransportPayload, normalized.DNS, nullableInt64(normalized.SpeedLimitBPS)); err != nil {
 		return Location{}, fmt.Errorf("insert location: %w", err)
 	}
 	return GetLocation(ctx, db, clientID, id)
@@ -264,7 +266,7 @@ func ListLocations(ctx context.Context, db *sql.DB, clientID string) ([]Location
 		return nil, err
 	}
 	rows, err := db.QueryContext(ctx, `
-SELECT id, client_id, name, enabled, provider, transport, room_id, crypto_key, transport_payload, dns, created_at, updated_at
+SELECT id, client_id, name, enabled, provider, transport, room_id, crypto_key, transport_payload, dns, speed_limit_bps, created_at, updated_at
 FROM locations
 WHERE node_id = ? AND client_id = ?
 ORDER BY created_at, id`, localNodeID, clientID)
@@ -289,7 +291,7 @@ ORDER BY created_at, id`, localNodeID, clientID)
 
 func GetLocation(ctx context.Context, db *sql.DB, clientID, id string) (Location, error) {
 	row := db.QueryRowContext(ctx, `
-SELECT id, client_id, name, enabled, provider, transport, room_id, crypto_key, transport_payload, dns, created_at, updated_at
+SELECT id, client_id, name, enabled, provider, transport, room_id, crypto_key, transport_payload, dns, speed_limit_bps, created_at, updated_at
 FROM locations
 WHERE node_id = ? AND client_id = ? AND id = ?`, localNodeID, clientID, id)
 	location, err := scanLocation(row)
@@ -319,9 +321,9 @@ func UpdateLocation(ctx context.Context, db *sql.DB, clientID, id string, input 
 	}
 	result, err := db.ExecContext(ctx, `
 UPDATE locations
-SET name = ?, enabled = ?, provider = ?, transport = ?, room_id = ?, crypto_key = ?, transport_payload = ?, dns = ?, updated_at = CURRENT_TIMESTAMP
+SET name = ?, enabled = ?, provider = ?, transport = ?, room_id = ?, crypto_key = ?, transport_payload = ?, dns = ?, speed_limit_bps = ?, updated_at = CURRENT_TIMESTAMP
 WHERE node_id = ? AND client_id = ? AND id = ?`,
-		normalized.Name, boolInt(*normalized.Enabled), normalized.Provider, normalized.Transport, normalized.RoomID, normalized.CryptoKey, normalized.TransportPayload, normalized.DNS, localNodeID, clientID, id)
+		normalized.Name, boolInt(*normalized.Enabled), normalized.Provider, normalized.Transport, normalized.RoomID, normalized.CryptoKey, normalized.TransportPayload, normalized.DNS, nullableInt64(normalized.SpeedLimitBPS), localNodeID, clientID, id)
 	if err != nil {
 		return Location{}, fmt.Errorf("update location: %w", err)
 	}
@@ -549,12 +551,17 @@ func scanLocation(row scanner) (Location, error) {
 	var location Location
 	var enabled int
 	var payload string
+	var speedLimit sql.NullInt64
 	var created, updated string
-	if err := row.Scan(&location.ID, &location.ClientID, &location.Name, &enabled, &location.Provider, &location.Transport, &location.RoomID, &location.CryptoKey, &payload, &location.DNS, &created, &updated); err != nil {
+	if err := row.Scan(&location.ID, &location.ClientID, &location.Name, &enabled, &location.Provider, &location.Transport, &location.RoomID, &location.CryptoKey, &payload, &location.DNS, &speedLimit, &created, &updated); err != nil {
 		return Location{}, err
 	}
 	location.Enabled = enabled != 0
 	location.TransportPayload = RawPayload(payload)
+	if speedLimit.Valid {
+		value := speedLimit.Int64
+		location.SpeedLimitBPS = &value
+	}
 	location.TransportStability, _ = ValidateProviderTransport(location.Provider, location.Transport)
 	location.RuntimeStatus = "pending"
 	location.CreatedAt, _ = parseTime(created)
@@ -610,6 +617,9 @@ func normalizeLocationInput(input LocationInput) (LocationInput, error) {
 	}
 	if _, _, err := net.SplitHostPort(input.DNS); err != nil {
 		return LocationInput{}, errors.New("dns must be host:port")
+	}
+	if input.SpeedLimitBPS != nil && *input.SpeedLimitBPS <= 0 {
+		return LocationInput{}, errors.New("speed_limit_bps must be null or positive")
 	}
 	return input, nil
 }

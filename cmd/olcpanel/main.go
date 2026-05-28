@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"olcpanel/internal/config"
+	"olcpanel/internal/netstack"
 	"olcpanel/internal/server"
 	"olcpanel/internal/storage"
 	"olcpanel/internal/supervisor"
@@ -36,6 +37,8 @@ func run(args []string) error {
 		return serve(args[1:])
 	case "migrate":
 		return migrate(args[1:])
+	case "doctor":
+		return doctor(args[1:])
 	case "-h", "--help", "help":
 		return usage()
 	default:
@@ -50,6 +53,7 @@ func serve(args []string) error {
 	databaseURL := flags.String("database-url", "", "database URL")
 	runtimeDir := flags.String("runtime-dir", "", "runtime directory for generated OlcRTC configs")
 	olcrtcBinary := flags.String("olcrtc-binary", "", "OlcRTC binary path or name")
+	networkCIDR := flags.String("network-cidr", "", "runtime network CIDR for location namespaces")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -62,6 +66,7 @@ func serve(args []string) error {
 		DatabaseURL:  *databaseURL,
 		RuntimeDir:   *runtimeDir,
 		OlcRTCBinary: *olcrtcBinary,
+		NetworkCIDR:  *networkCIDR,
 	})
 	if err != nil {
 		return err
@@ -76,7 +81,13 @@ func serve(args []string) error {
 	if err := storage.Migrate(ctx, db); err != nil {
 		return err
 	}
-	runtimeRunner := supervisor.NewProcessRunner(cfg.RuntimeDir, cfg.OlcRTCBinary)
+	stack := netstack.New(netstack.Options{NetworkCIDR: cfg.NetworkCIDR})
+	if err := stack.EnsureForwarding(ctx); err != nil {
+		return err
+	}
+	runtimeRunner := supervisor.NewProcessRunnerWithOptions(cfg.RuntimeDir, cfg.OlcRTCBinary, supervisor.ProcessRunnerOptions{
+		Netstack: netstackAdapter{stack: stack},
+	})
 	processSupervisor := supervisor.New(db, supervisor.WithRunner(runtimeRunner))
 	if result, err := processSupervisor.Reload(ctx); err != nil {
 		slog.Error("initial supervisor reload failed", "error", err)
@@ -188,6 +199,102 @@ func migrate(args []string) error {
 	return storage.Migrate(ctx, db)
 }
 
+func doctor(args []string) error {
+	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databaseURL := flags.String("database-url", "", "database URL")
+	networkCIDR := flags.String("network-cidr", "", "runtime network CIDR for location namespaces")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+
+	cfg, err := config.LoadWithOptions(config.LoadOptions{
+		DatabaseURL: *databaseURL,
+		NetworkCIDR: *networkCIDR,
+	})
+	if err != nil {
+		return err
+	}
+
+	ctx := context.Background()
+	activeIDs, findings := activeLocationIDs(ctx, cfg.DatabaseURL)
+	stack := netstack.New(netstack.Options{NetworkCIDR: cfg.NetworkCIDR})
+	report := stack.Doctor(ctx, activeIDs)
+	for _, finding := range findings {
+		report.Healthy = false
+		report.Findings = append(report.Findings, finding)
+	}
+	fmt.Fprint(os.Stdout, report.String())
+	if !report.Healthy {
+		return errors.New("doctor found unhealthy runtime state")
+	}
+	return nil
+}
+
+func activeLocationIDs(ctx context.Context, databaseURL string) ([]string, []string) {
+	db, err := storage.Open(ctx, databaseURL)
+	if err != nil {
+		return nil, []string{"database unavailable: " + err.Error()}
+	}
+	defer db.Close()
+
+	rows, err := db.QueryContext(ctx, `
+SELECT l.id
+FROM locations l
+JOIN clients c ON c.id = l.client_id AND c.node_id = l.node_id
+WHERE l.node_id = ? AND l.enabled = 1 AND c.enabled = 1
+ORDER BY l.id`, "local")
+	if err != nil {
+		return nil, []string{"database query failed: " + err.Error()}
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return ids, []string{"database scan failed: " + err.Error()}
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return ids, []string{"database iteration failed: " + err.Error()}
+	}
+	return ids, nil
+}
+
+type netstackAdapter struct {
+	stack *netstack.Stack
+}
+
+func (adapter netstackAdapter) Ensure(ctx context.Context, state supervisor.LocationState) error {
+	return adapter.stack.Ensure(ctx, netstack.LocationState{
+		LocationID:     state.LocationID,
+		DNS:            state.DNS,
+		SpeedLimitBPS:  state.SpeedLimitBPS,
+		TrafficEnabled: !state.TrafficDisabled,
+	})
+}
+
+func (adapter netstackAdapter) Cleanup(ctx context.Context, state supervisor.LocationState) error {
+	return adapter.stack.Cleanup(ctx, state.LocationID)
+}
+
+func (adapter netstackAdapter) Validate(ctx context.Context, states []supervisor.LocationState) error {
+	return adapter.stack.Validate(ctx, supervisorStatesToNetstack(states))
+}
+
+func supervisorStatesToNetstack(states []supervisor.LocationState) []netstack.LocationState {
+	result := make([]netstack.LocationState, 0, len(states))
+	for _, state := range states {
+		result = append(result, netstack.LocationState{LocationID: state.LocationID})
+	}
+	return result
+}
+
 func usage() error {
 	fmt.Fprint(os.Stderr, commandUsage())
 	return nil
@@ -197,13 +304,15 @@ func commandUsage() string {
 	return `olcpanel manages a local OlcRTC VPS panel.
 
 Usage:
-  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc]
+  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16]
   olcpanel migrate [--database-url sqlite:///etc/olcpanel/panel.db]
+  olcpanel doctor [--database-url sqlite:///etc/olcpanel/panel.db] [--network-cidr 10.255.0.0/16]
 
 Environment:
   OLCPANEL_BIND           HTTP bind address. Defaults to 127.0.0.1:8888.
   OLCPANEL_DATABASE_URL   Database URL. Defaults to sqlite:///etc/olcpanel/panel.db.
   OLCPANEL_RUNTIME_DIR    Runtime config directory. Defaults to /var/lib/olcpanel/runtime.
   OLCPANEL_OLCRTC_BINARY  OlcRTC binary path or name. Defaults to olcrtc.
+  OLCPANEL_NETWORK_CIDR   Runtime network CIDR. Defaults to 10.255.0.0/16.
 `
 }

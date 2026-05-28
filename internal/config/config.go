@@ -7,6 +7,7 @@ const (
 	DefaultDatabaseURL  = "sqlite:///etc/olcpanel/panel.db"
 	DefaultRuntimeDir   = "/var/lib/olcpanel/runtime"
 	DefaultOlcRTCBinary = "olcrtc"
+	DefaultNetworkCIDR  = "10.255.0.0/16"
 )
 
 type Config struct {
@@ -14,6 +15,7 @@ type Config struct {
 	DatabaseURL  string
 	RuntimeDir   string
 	OlcRTCBinary string
+	NetworkCIDR  string
 }
 
 type LoadOptions struct {
@@ -21,6 +23,7 @@ type LoadOptions struct {
 	DatabaseURL  string
 	RuntimeDir   string
 	OlcRTCBinary string
+	NetworkCIDR  string
 }
 
 func Load() (Config, error) {
@@ -60,10 +63,19 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		olcrtcBinary = options.OlcRTCBinary
 	}
 
+	networkCIDR := os.Getenv("OLCPANEL_NETWORK_CIDR")
+	if networkCIDR == "" {
+		networkCIDR = DefaultNetworkCIDR
+	}
+	if options.NetworkCIDR != "" {
+		networkCIDR = options.NetworkCIDR
+	}
+
 	return Config{
 		BindAddress:  bindAddress,
 		DatabaseURL:  databaseURL,
 		RuntimeDir:   runtimeDir,
 		OlcRTCBinary: olcrtcBinary,
+		NetworkCIDR:  networkCIDR,
 	}, nil
 }
