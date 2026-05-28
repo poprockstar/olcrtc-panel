@@ -15,6 +15,7 @@ import (
 	"olcpanel/internal/config"
 	"olcpanel/internal/server"
 	"olcpanel/internal/storage"
+	"olcpanel/internal/supervisor"
 	"olcpanel/internal/webui"
 )
 
@@ -71,10 +72,11 @@ func serve(args []string) error {
 	if err := storage.Migrate(ctx, db); err != nil {
 		return err
 	}
+	processSupervisor := supervisor.New(db)
 
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddress,
-		Handler:           server.New(cfg, webui.Assets(), server.WithDatabase(db)),
+		Handler:           server.New(cfg, webui.Assets(), server.WithDatabase(db), server.WithSupervisor(processSupervisor)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -85,20 +87,62 @@ func serve(args []string) error {
 	}()
 
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(signals)
 
-	select {
-	case sig := <-signals:
-		slog.Info("shutdown requested", "signal", sig.String())
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return httpServer.Shutdown(ctx)
-	case err := <-errs:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+	for {
+		select {
+		case sig := <-signals:
+			shutdown, err := handleServerSignal(sig, httpServer, processSupervisor)
+			if err != nil {
+				return err
+			}
+			if shutdown {
+				return nil
+			}
+		case err := <-errs:
+			if errors.Is(err, http.ErrServerClosed) {
+				return nil
+			}
+			return err
 		}
-		return err
 	}
+}
+
+type serveReloader interface {
+	Reload(context.Context) (supervisor.ReloadResult, error)
+}
+
+func handleServerSignal(sig os.Signal, httpServer *http.Server, reloader serveReloader) (bool, error) {
+	if sig == syscall.SIGHUP {
+		if reloader == nil {
+			slog.Warn("reload requested but supervisor is unavailable", "signal", sig.String())
+			return false, nil
+		}
+		result, err := reloader.Reload(context.Background())
+		if err != nil {
+			slog.Error("supervisor reload failed", "signal", sig.String(), "error", err)
+			return false, nil
+		}
+		slog.Info(
+			"supervisor reload applied",
+			"signal", sig.String(),
+			"started", result.Summary.Started,
+			"restarted", result.Summary.Restarted,
+			"stopped", result.Summary.Stopped,
+			"unchanged", result.Summary.Unchanged,
+			"skipped", result.Summary.Skipped,
+		)
+		return false, nil
+	}
+
+	slog.Info("shutdown requested", "signal", sig.String())
+	if httpServer == nil {
+		return true, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return true, httpServer.Shutdown(ctx)
 }
 
 func migrate(args []string) error {

@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"strings"
+	"syscall"
 	"testing"
 
 	"olcpanel/internal/storage"
+	"olcpanel/internal/supervisor"
 )
 
 func TestServeRejectsUnexpectedArgument(t *testing.T) {
@@ -38,4 +40,35 @@ func TestMigrateCommandRunsMigrations(t *testing.T) {
 	if settings.UILocale != "en" {
 		t.Fatalf("UILocale = %q, want migrated default", settings.UILocale)
 	}
+}
+
+func TestHandleServerSignalReloadsOnSIGHUPWithoutShutdown(t *testing.T) {
+	reloader := &fakeReloader{err: errReloadFailed{}}
+
+	shutdown, err := handleServerSignal(syscall.SIGHUP, nil, reloader)
+	if err != nil {
+		t.Fatalf("handleServerSignal returned error: %v", err)
+	}
+	if shutdown {
+		t.Fatal("shutdown = true, want false for best-effort reload")
+	}
+	if reloader.calls != 1 {
+		t.Fatalf("reloader calls = %d, want 1", reloader.calls)
+	}
+}
+
+type fakeReloader struct {
+	calls int
+	err   error
+}
+
+func (reloader *fakeReloader) Reload(context.Context) (supervisor.ReloadResult, error) {
+	reloader.calls++
+	return supervisor.ReloadResult{Summary: supervisor.Summary{Started: 1}}, reloader.err
+}
+
+type errReloadFailed struct{}
+
+func (errReloadFailed) Error() string {
+	return "reload failed"
 }

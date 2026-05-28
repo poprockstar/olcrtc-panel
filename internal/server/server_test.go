@@ -19,6 +19,7 @@ import (
 	"olcpanel/internal/config"
 	"olcpanel/internal/server"
 	"olcpanel/internal/storage"
+	"olcpanel/internal/supervisor"
 )
 
 func TestStateEndpointReturnsFirstRunState(t *testing.T) {
@@ -256,6 +257,92 @@ func TestAPIKeyCanReadAndUpdateSettingsWithoutCSRF(t *testing.T) {
 	handler.ServeHTTP(revokedRec, revokedReq)
 	if revokedRec.Code != http.StatusUnauthorized {
 		t.Fatalf("revoked key status = %d, want %d", revokedRec.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestReloadEndpointRequiresSetupAuthAndSessionCSRF(t *testing.T) {
+	db := testDB(t)
+	reloader := &fakeReloader{}
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db), server.WithSupervisor(reloader))
+
+	beforeReq := httptest.NewRequest(http.MethodPost, "/api/v1/reload", nil)
+	beforeRec := httptest.NewRecorder()
+	handler.ServeHTTP(beforeRec, beforeReq)
+	if beforeRec.Code != http.StatusForbidden {
+		t.Fatalf("before setup status = %d, want %d", beforeRec.Code, http.StatusForbidden)
+	}
+
+	if _, err := auth.CreateFirstAdmin(context.Background(), db, "admin", "correct horse battery"); err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+	unauthReq := httptest.NewRequest(http.MethodPost, "/api/v1/reload", nil)
+	unauthRec := httptest.NewRecorder()
+	handler.ServeHTTP(unauthRec, unauthReq)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want %d", unauthRec.Code, http.StatusUnauthorized)
+	}
+
+	loginHandler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(testDB(t)), server.WithSupervisor(reloader))
+	cookies, csrf := loginSession(t, loginHandler)
+	withoutReq := httptest.NewRequest(http.MethodPost, "/api/v1/reload", nil)
+	for _, cookie := range cookies {
+		withoutReq.AddCookie(cookie)
+	}
+	withoutRec := httptest.NewRecorder()
+	loginHandler.ServeHTTP(withoutRec, withoutReq)
+	if withoutRec.Code != http.StatusForbidden {
+		t.Fatalf("without csrf status = %d, want %d", withoutRec.Code, http.StatusForbidden)
+	}
+	if reloader.calls != 0 {
+		t.Fatalf("reloader calls = %d, want 0 before csrf passes", reloader.calls)
+	}
+
+	withReq := httptest.NewRequest(http.MethodPost, "/api/v1/reload", nil)
+	withReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		withReq.AddCookie(cookie)
+	}
+	withRec := httptest.NewRecorder()
+	loginHandler.ServeHTTP(withRec, withReq)
+	if withRec.Code != http.StatusOK {
+		t.Fatalf("with csrf status = %d, want %d, body: %s", withRec.Code, http.StatusOK, withRec.Body.String())
+	}
+	if reloader.calls != 1 {
+		t.Fatalf("reloader calls = %d, want 1", reloader.calls)
+	}
+}
+
+func TestAPIKeyCanCallReloadWithoutCSRF(t *testing.T) {
+	db := testDB(t)
+	reloader := &fakeReloader{result: supervisor.ReloadResult{
+		Summary: supervisor.Summary{Started: 1},
+		Actions: []supervisor.ActionResult{{
+			LocationID: "loc_1",
+			ClientID:   "cl_1",
+			Action:     supervisor.ActionStarted,
+			Reason:     supervisor.ReasonNew,
+		}},
+	}}
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db), server.WithSupervisor(reloader))
+	token := createAPIKey(t, handler)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/reload", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if reloader.calls != 1 {
+		t.Fatalf("reloader calls = %d, want 1", reloader.calls)
+	}
+	var body supervisor.ReloadResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("response is not JSON: %v", err)
+	}
+	if body.Summary.Started != 1 || len(body.Actions) != 1 || body.Actions[0].Action != supervisor.ActionStarted || body.Actions[0].Reason != supervisor.ReasonNew {
+		t.Fatalf("reload response = %#v, want injected result", body)
 	}
 }
 
@@ -809,6 +896,17 @@ func TestSubscriptionEndpointsReturnNotFoundForInvalidOrUnavailableClients(t *te
 			}
 		})
 	}
+}
+
+type fakeReloader struct {
+	calls  int
+	result supervisor.ReloadResult
+	err    error
+}
+
+func (reloader *fakeReloader) Reload(context.Context) (supervisor.ReloadResult, error) {
+	reloader.calls++
+	return reloader.result, reloader.err
 }
 
 func loginSession(t *testing.T, handler http.Handler) ([]*http.Cookie, string) {

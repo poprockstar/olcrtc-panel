@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"olcpanel/internal/config"
 	"olcpanel/internal/storage"
 	"olcpanel/internal/subscriptions"
+	"olcpanel/internal/supervisor"
 )
 
 const maxJSONBodyBytes = 1 << 20
@@ -33,14 +35,25 @@ type Option func(*dependencies)
 
 type dependencies struct {
 	db                *sql.DB
+	supervisor        reloader
 	setupLimiter      *auth.RateLimiter
 	loginLimiter      *auth.RateLimiter
 	apiKeyFailLimiter *auth.RateLimiter
 }
 
+type reloader interface {
+	Reload(context.Context) (supervisor.ReloadResult, error)
+}
+
 func WithDatabase(db *sql.DB) Option {
 	return func(deps *dependencies) {
 		deps.db = db
+	}
+}
+
+func WithSupervisor(supervisor reloader) Option {
+	return func(deps *dependencies) {
+		deps.supervisor = supervisor
 	}
 }
 
@@ -58,12 +71,31 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 	registerStateRoutes(mux, cfg, deps)
 	registerAuthRoutes(mux, deps)
 	registerSettingsRoutes(mux, deps)
+	registerReloadRoutes(mux, deps)
 	registerClientRoutes(mux, deps)
 	registerSubscriptionRoutes(mux, deps)
 	registerAPIKeyRoutes(mux, deps)
 	registerStaticRoutes(mux, assets)
 
 	return mux
+}
+
+func registerReloadRoutes(mux *http.ServeMux, deps dependencies) {
+	mux.HandleFunc("POST /api/v1/reload", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		if deps.supervisor == nil {
+			http.Error(w, "supervisor is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		result, err := deps.supervisor.Reload(r.Context())
+		if err != nil {
+			http.Error(w, "failed to reload supervisor", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, result)
+	})
 }
 
 func registerStateRoutes(mux *http.ServeMux, cfg config.Config, deps dependencies) {

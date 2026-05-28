@@ -13,7 +13,7 @@ Last updated: 2026-05-27
 
 ## Phase State
 
-- Current phase: Phase 5 - Subscription Rendering complete; Phase 6 - Supervisor And Reload Diff is next.
+- Current phase: Phase 6 - Supervisor And Reload Diff complete; Phase 7 - Runtime Config And Process Launch is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -21,7 +21,8 @@ Last updated: 2026-05-27
   - Phase 3 - Auth And Security Baseline
   - Phase 4 - Clients And Locations Domain API
   - Phase 5 - Subscription Rendering
-- Next session target: start Phase 6 supervisor desired-state loading and reload diff behavior.
+  - Phase 6 - Supervisor And Reload Diff
+- Next session target: start Phase 7 runtime config rendering and real OlcRTC process launch.
 
 ## Implemented Capabilities
 
@@ -85,6 +86,13 @@ Last updated: 2026-05-27
 - `GET /sub/{token}` added as an unauthenticated plaintext subscription endpoint.
 - `GET /c/{client_id}` added as an opt-in plaintext endpoint gated by `public_client_endpoint_enabled`; it remains disabled by default.
 - `POST /api/v1/clients/{id}/rotate` accepts `rotate_subscription_token`; rotating it invalidates old `/sub/{token}` links.
+- `internal/supervisor` added with an in-memory per-location desired-state diff and fakeable runner boundary.
+- Supervisor reload loads local desired state from SQLite clients, locations, settings, expiry, and quota fields.
+- Reload actions report `started`, `restarted`, `stopped`, `unchanged`, and `skipped` with reasons for new, changed, removed, disabled, expired, quota-locked, and unchanged locations.
+- Phase 6 runner behavior is intentionally no-op by default; real `olcrtc` config rendering and process launch remain deferred to Phase 7.
+- Authenticated `POST /api/v1/reload` added; browser sessions require CSRF and API-key requests bypass CSRF like other admin APIs.
+- `olcpanel serve` now owns one supervisor instance and handles `SIGHUP` as a best-effort supervisor reload without terminating the server on reload failure.
+- Standalone `olcpanel reload` remains deferred until daemon IPC or HTTP-client behavior is designed.
 
 ## Phase 0 Architecture Review Notes
 
@@ -149,6 +157,16 @@ Last updated: 2026-05-27
 - URI payload status: renders official aliases for VP8 (`vp8-fps`, `vp8-batch`), SEI (`fps`, `batch`, `frag`, `ack-ms`), and video (`video-*`) payload fields; `datachannel` and default payloads omit the payload block.
 - Token rotation status: `rotate_subscription_token` changes only the private subscription token unless `rotate_rooms` is also requested; old token URLs return `404`.
 - Runtime enforcement for disabled, expired, and quota-exceeded states remains deferred; Phase 5 only reports current quota metadata in the plaintext output.
+
+## Phase 6 Completion Notes
+
+- Supervisor package status: desired-state loading and in-memory diffing are implemented for the local node.
+- Reload decision status: new active locations start, unchanged locations are left alone, changed locations restart, removed locations stop, and ineligible non-running locations are reported as skipped.
+- Enforcement status: disabled clients, disabled locations, expired clients, and quota-exceeded clients in `quota_lock_mode=stop` stop running supervisor entries.
+- Runtime runner status: the default runner is no-op, so Phase 6 records and exposes decisions without launching real `olcrtc` processes.
+- Admin reload API status: `POST /api/v1/reload` returns a summary and per-location action list.
+- Daemon reload status: `SIGHUP` calls the same supervisor reload path and logs the resulting counts; reload failures are logged and do not stop the HTTP server.
+- CLI reload status: standalone `olcpanel reload` was intentionally not added in Phase 6.
 
 ## Review Hardening Fixes Notes
 
@@ -218,14 +236,20 @@ Last updated: 2026-05-27
   - `npm --prefix frontend run build` passed.
   - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+- Phase 6:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
 
 ## Open Risks And Blockers
 
 - SQLite is the only Phase 2 runtime-verified database. PostgreSQL URLs are recognized, but PostgreSQL driver/runtime support remains a future implementation task.
 - Rate limiting is in-memory, keyed by direct `RemoteAddr`, and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
 - Frontend auth/setup/login and client/location screens are not implemented yet; operators must use direct API calls until Phase 11.
-- Phase 4 stores disabled, expiry, and quota fields and reports derived states, but runtime enforcement is intentionally deferred.
-- Phase 5 subscription output reports quota metadata but does not enforce quota/expiry at runtime; enforcement remains a later supervisor/accounting responsibility.
+- Phase 6 enforces disabled, expired, and stop-mode quota states only inside the in-memory supervisor; real process termination will matter once Phase 7 adds actual `olcrtc` launch.
+- `quota_lock_mode=disable_traffic` remains pending netns/tc traffic-control work and does not stop locations in Phase 6.
+- Standalone CLI reload remains pending daemon IPC or HTTP-client design.
 - Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
 - Current verification ran from Windows, but production assumptions and later e2e tests must target Linux servers.
