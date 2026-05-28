@@ -5,10 +5,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"olcpanel/internal/netstack"
+	"olcpanel/internal/observability"
 	"olcpanel/internal/supervisor"
 )
 
@@ -140,6 +142,28 @@ func TestProcessRunnerRecordsUnexpectedExitWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestProcessRunnerCapturesChildOutputWithLocationMetadata(t *testing.T) {
+	exe := fakeExecutable(t)
+	logs := &recordingLogSink{}
+	runner := supervisor.NewProcessRunnerWithOptions(t.TempDir(), exe, supervisor.ProcessRunnerOptions{
+		LogSink: logs,
+	})
+	state := processLocation("loc_output", "room-output")
+
+	if err := runner.Start(context.Background(), state); err != nil {
+		t.Fatalf("Start returned error: %v", err)
+	}
+	t.Cleanup(func() { _ = runner.Stop(context.Background(), state) })
+
+	waitForLogMessages(t, logs, "stdout says hello", "stderr says hello")
+	entries := logs.entriesSnapshot()
+	if len(entries) < 2 {
+		t.Fatalf("entries = %#v, want stdout and stderr entries", entries)
+	}
+	assertCapturedOutput(t, entries, "olcrtc_stdout", state.ClientID, state.LocationID, "stdout says hello")
+	assertCapturedOutput(t, entries, "olcrtc_stderr", state.ClientID, state.LocationID, "stderr says hello")
+}
+
 func processLocation(id, room string) supervisor.LocationState {
 	return supervisor.LocationState{
 		LocationID:       id,
@@ -175,6 +199,11 @@ func runFakeOlcRTC() int {
 	_ = os.WriteFile(filepath.Join(dir, "args.txt"), []byte(strings.Join(os.Args[1:], " ")+"\n"), 0o644)
 	_ = os.WriteFile(filepath.Join(dir, "pid.txt"), []byte(intString(os.Getpid())+"\n"), 0o644)
 	data, _ := os.ReadFile(configPath)
+	if strings.Contains(string(data), `id: "room-output"`) {
+		_, _ = os.Stdout.WriteString("stdout says hello\n")
+		_, _ = os.Stderr.WriteString("stderr says hello\n")
+		select {}
+	}
 	if strings.Contains(string(data), `id: "room-exit"`) {
 		return 42
 	}
@@ -301,4 +330,61 @@ func intString(value int) string {
 		value /= 10
 	}
 	return string(digits[i:])
+}
+
+type recordingLogSink struct {
+	mu      sync.Mutex
+	entries []observability.LogEntry
+}
+
+func (sink *recordingLogSink) Append(_ context.Context, entry observability.LogEntry) error {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	sink.entries = append(sink.entries, entry)
+	return nil
+}
+
+func (sink *recordingLogSink) entriesSnapshot() []observability.LogEntry {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	entries := make([]observability.LogEntry, len(sink.entries))
+	copy(entries, sink.entries)
+	return entries
+}
+
+func waitForLogMessages(t *testing.T, sink *recordingLogSink, messages ...string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		entries := sink.entriesSnapshot()
+		found := make(map[string]bool, len(messages))
+		for _, entry := range entries {
+			found[entry.Message] = true
+		}
+		all := true
+		for _, message := range messages {
+			if !found[message] {
+				all = false
+				break
+			}
+		}
+		if all {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for log messages %v; entries = %#v", messages, sink.entriesSnapshot())
+}
+
+func assertCapturedOutput(t *testing.T, entries []observability.LogEntry, source, clientID, locationID, message string) {
+	t.Helper()
+	for _, entry := range entries {
+		if entry.Source == source && entry.Message == message {
+			if entry.ClientID != clientID || entry.LocationID != locationID || entry.Level != "info" {
+				t.Fatalf("entry = %#v, want client/location metadata and info level", entry)
+			}
+			return
+		}
+	}
+	t.Fatalf("entries = %#v, missing %s message %q", entries, source, message)
 }

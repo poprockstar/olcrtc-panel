@@ -13,7 +13,7 @@ Last updated: 2026-05-28
 
 ## Phase State
 
-- Current phase: Phase 9 - Traffic Accounting, Quotas, And Expiry complete; Phase 10 - Observability And Runtime Status is next.
+- Current phase: Phase 10 - Logs, Metrics, And Runtime Status API complete; Phase 11 - Frontend Operational UI is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -25,7 +25,8 @@ Last updated: 2026-05-28
   - Phase 7 - Runtime Config And Process Launch
   - Phase 8 - Netns, Veth, NAT, DNS, And TC
   - Phase 9 - Traffic Accounting, Quotas, And Expiry
-- Next session target: start Phase 10 observability and runtime status surfaces for traffic/runtime outcomes.
+  - Phase 10 - Logs, Metrics, And Runtime Status API
+- Next session target: start Phase 11 frontend operational UI for authenticated setup/login and operator observability screens.
 
 ## Implemented Capabilities
 
@@ -131,6 +132,17 @@ Last updated: 2026-05-28
 - Persisted deltas increment `clients.quota_used_bytes`, so client API and subscription quota metadata now reflect live accounting totals.
 - `olcpanel serve` starts the traffic sampler after the initial supervisor reload and stops it during server shutdown.
 - Quota-exceeded and expiry transitions detected by the sampler trigger a best-effort supervisor reload once for the transition.
+- Observability logging options added:
+  - `OLCPANEL_LOG_PATH` and `olcpanel serve --log-path`, default `/var/log/olcpanel/panel.log`.
+- `internal/observability` added with JSONL log entries, safe append, parent directory creation, `panel.log` to `panel.log.1` rotation at 25 MiB, query filtering, and plaintext formatting.
+- Panel `slog` output now fans out to stderr and the JSONL file sink.
+- OlcRTC child stdout/stderr still mirror to the panel process streams and are also captured as `olcrtc_stdout` and `olcrtc_stderr` log entries with client/location metadata.
+- Authenticated `GET /api/v1/logs` added with level/source/client/location/time/search/limit filters; `format=json` is the default and `format=text` returns copy/download-friendly plaintext.
+- `internal/metrics` added for dashboard snapshots with panel uptime, nullable host metrics, client/location/process counts, traffic totals, quota warnings/exceeded counts, expired clients, and per-client summaries.
+- Linux host metrics read `/proc/stat`, `/proc/meminfo`, and filesystem stats; non-Linux builds return nullable host fields.
+- Authenticated `GET /api/v1/metrics` added for session or API-key reads without CSRF.
+- Supervisor now exposes a read-only per-location runtime status snapshot, and location API responses overlay `running`, `stopped`, `failed`, or `pending` from the supervisor when available.
+- Failed child exits are visible through metrics process counts and location `runtime_status` responses.
 
 ## Phase 0 Architecture Review Notes
 
@@ -235,6 +247,16 @@ Last updated: 2026-05-28
 - Runtime enforcement status: the sampler detects quota and expiry transitions after startup and calls the supervisor reload path once per crossing so existing Phase 6/8 stop or traffic-disable behavior applies.
 - Startup status: sampling runs in the `serve` process after the initial best-effort reload, logs sample errors, and does not stop the HTTP service on sample failures.
 
+## Phase 10 Completion Notes
+
+- Schema version: unchanged at `6`; Phase 10 adds runtime/API surfaces without a database migration.
+- Log status: panel logs are written to stderr and the configured JSONL file, with rotation to `.1` at 25 MiB. Missing log files query as empty, while unavailable sinks return `503`.
+- Log API status: `GET /api/v1/logs` is admin-only, supports session or API-key auth without CSRF, and returns JSON by default or plaintext with `format=text`.
+- Process output status: OlcRTC stdout/stderr are still mirrored to the service streams and are captured as structured log entries with `client_id` and `location_id`.
+- Metrics API status: `GET /api/v1/metrics` returns one dashboard snapshot for panel uptime, host resources, clients, locations, processes, traffic, quotas, expiry, and per-client summaries.
+- Runtime status status: supervisor snapshots now surface real per-location `running`, `failed`, and `pending` states through metrics and location API responses; stopped is represented when a status provider reports it.
+- Platform status: Linux host resource metrics use `/proc` and filesystem stats; Windows/non-Linux verification intentionally returns nullable host fields.
+
 ## Review Hardening Fixes Notes
 
 - No new roadmap features were pulled forward.
@@ -325,21 +347,27 @@ Last updated: 2026-05-28
   - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
   - `go test -tags root_e2e ./internal/netstack` was not run in this Windows session; it remains a Linux/root/capability-enabled verification path.
+- Phase 10:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin\olcpanel.exe .\cmd\olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
+  - `go test -tags root_e2e ./internal/netstack` was not run in this Windows session; it remains a Linux/root/capability-enabled verification path.
 
 ## Open Risks And Blockers
 
 - SQLite is the only Phase 2 runtime-verified database. PostgreSQL URLs are recognized, but PostgreSQL driver/runtime support remains a future implementation task.
 - Rate limiting is in-memory, keyed by direct `RemoteAddr`, and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
-- Frontend auth/setup/login and client/location screens are not implemented yet; operators must use direct API calls until Phase 11.
+- Frontend auth/setup/login, client/location, logs, metrics, and runtime status screens are not implemented yet; operators must use direct API calls until Phase 11.
 - Real OlcRTC session verification remains a Linux deployment check; Phase 7 unit tests use fake executables to prove process lifecycle behavior.
-- Runtime process stdout/stderr currently inherit the panel service streams for systemd/journal capture; structured log APIs remain deferred to Phase 10.
-- Unexpected OlcRTC child exits are recorded internally as failed but are not surfaced through an admin API until observability work in Phase 10.
 - Standalone CLI reload remains pending daemon IPC or HTTP-client design.
 - Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
 - Current verification ran from Windows, but production netns/veth/tc behavior must be verified in an isolated Linux environment with `go test -tags root_e2e ./internal/netstack`.
 - `olcpanel doctor` detects stale OlcPanel namespaces/veths and required command/sysctl state, but deeper NAT/tc drift reporting may need additional hardening during Linux deployment validation.
 - Traffic accounting depends on Linux sysfs veth statistics at runtime; Windows verification covers the reader with a temporary sysfs-shaped fixture, not real kernel counters.
+- Host metrics are snapshot-only and intentionally not retained historically; long-term charts or Prometheus-style scraping remain future work.
+- The JSONL log sink is local-file based and rotates only one previous file (`panel.log.1`); external log retention remains an operator/systemd concern.
 - The updated Go dependency set now records `go 1.25.0`; future environments need a compatible Go toolchain.
 
 ## Architecture Compliance Checklist

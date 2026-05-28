@@ -220,6 +220,23 @@ func (supervisor *Supervisor) Reload(ctx context.Context) (ReloadResult, error) 
 	return result, nil
 }
 
+func (supervisor *Supervisor) StatusSnapshot() map[string]ProcessStatus {
+	if supervisor == nil {
+		return map[string]ProcessStatus{}
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	result := make(map[string]ProcessStatus, len(supervisor.running))
+	for id := range supervisor.running {
+		status := supervisor.runner.Status(id)
+		if status == ProcessUnknown {
+			status = ProcessPending
+		}
+		result[id] = status
+	}
+	return result
+}
+
 func (supervisor *Supervisor) runnerRunning(locationID string) bool {
 	return supervisor.runner.Status(locationID) == ProcessRunning
 }

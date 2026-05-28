@@ -17,6 +17,8 @@ import (
 	"olcpanel/internal/auth"
 	"olcpanel/internal/clients"
 	"olcpanel/internal/config"
+	"olcpanel/internal/metrics"
+	"olcpanel/internal/observability"
 	"olcpanel/internal/storage"
 	"olcpanel/internal/subscriptions"
 	"olcpanel/internal/supervisor"
@@ -37,6 +39,10 @@ type Option func(*dependencies)
 type dependencies struct {
 	db                *sql.DB
 	supervisor        reloader
+	statuses          metrics.StatusProvider
+	logStore          logStore
+	hostReader        metrics.HostReader
+	startedAt         time.Time
 	setupLimiter      *auth.RateLimiter
 	loginLimiter      *auth.RateLimiter
 	apiKeyFailLimiter *auth.RateLimiter
@@ -44,6 +50,10 @@ type dependencies struct {
 
 type reloader interface {
 	Reload(context.Context) (supervisor.ReloadResult, error)
+}
+
+type logStore interface {
+	Query(context.Context, observability.LogQuery) ([]observability.LogEntry, error)
 }
 
 func WithDatabase(db *sql.DB) Option {
@@ -55,11 +65,27 @@ func WithDatabase(db *sql.DB) Option {
 func WithSupervisor(supervisor reloader) Option {
 	return func(deps *dependencies) {
 		deps.supervisor = supervisor
+		if statuses, ok := supervisor.(metrics.StatusProvider); ok {
+			deps.statuses = statuses
+		}
+	}
+}
+
+func WithLogStore(store logStore) Option {
+	return func(deps *dependencies) {
+		deps.logStore = store
+	}
+}
+
+func WithMetricsHostReader(reader metrics.HostReader) Option {
+	return func(deps *dependencies) {
+		deps.hostReader = reader
 	}
 }
 
 func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 	deps := dependencies{
+		startedAt:         time.Now().UTC(),
 		setupLimiter:      auth.NewRateLimiter(5, time.Minute),
 		loginLimiter:      auth.NewRateLimiter(5, time.Minute),
 		apiKeyFailLimiter: auth.NewRateLimiter(10, time.Minute),
@@ -76,6 +102,7 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 	registerClientRoutes(mux, deps)
 	registerSubscriptionRoutes(mux, deps)
 	registerAPIKeyRoutes(mux, deps)
+	registerObservabilityRoutes(mux, deps)
 	registerStaticRoutes(mux, assets)
 
 	return mux
@@ -344,6 +371,7 @@ func registerClientRoutes(mux *http.ServeMux, deps dependencies) {
 			http.Error(w, "failed to list locations", http.StatusInternalServerError)
 			return
 		}
+		result = deps.overlayLocations(result)
 		writeJSON(w, result)
 	})
 
@@ -364,6 +392,7 @@ func registerClientRoutes(mux *http.ServeMux, deps dependencies) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		location = deps.overlayLocation(location)
 		writeJSON(w, location)
 	})
 
@@ -384,6 +413,7 @@ func registerClientRoutes(mux *http.ServeMux, deps dependencies) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		location = deps.overlayLocation(location)
 		writeJSON(w, location)
 	})
 
@@ -435,6 +465,7 @@ func registerClientRoutes(mux *http.ServeMux, deps dependencies) {
 			http.Error(w, "failed to rotate locations", http.StatusInternalServerError)
 			return
 		}
+		locations = deps.overlayLocations(locations)
 		writeJSON(w, locations)
 	})
 }
@@ -569,6 +600,56 @@ func registerAPIKeyRoutes(mux *http.ServeMux, deps dependencies) {
 	})
 }
 
+func registerObservabilityRoutes(mux *http.ServeMux, deps dependencies) {
+	mux.HandleFunc("GET /api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, false); !ok {
+			return
+		}
+		if deps.logStore == nil {
+			http.Error(w, "log sink is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		query, err := parseLogQuery(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		entries, err := deps.logStore.Query(r.Context(), query)
+		if errors.Is(err, observability.ErrUnavailable) {
+			http.Error(w, "log sink is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		if err != nil {
+			http.Error(w, "failed to read logs", http.StatusInternalServerError)
+			return
+		}
+		if r.URL.Query().Get("format") == "text" {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(observability.FormatText(entries)))
+			return
+		}
+		writeJSON(w, struct {
+			Entries []observability.LogEntry `json:"entries"`
+		}{Entries: entries})
+	})
+
+	mux.HandleFunc("GET /api/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, false); !ok {
+			return
+		}
+		snapshot, err := metrics.BuildSnapshot(r.Context(), deps.db, metrics.Options{
+			StartedAt:  deps.startedAt,
+			HostReader: deps.hostReader,
+			Statuses:   deps.statuses,
+		})
+		if err != nil {
+			http.Error(w, "failed to build metrics snapshot", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, snapshot)
+	})
+}
+
 func registerStaticRoutes(mux *http.ServeMux, assets fs.FS) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -594,6 +675,39 @@ func registerStaticRoutes(mux *http.ServeMux, assets fs.FS) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		_, _ = w.Write(data)
 	})
+}
+
+func parseLogQuery(r *http.Request) (observability.LogQuery, error) {
+	values := r.URL.Query()
+	query := observability.LogQuery{
+		Level:      strings.TrimSpace(values.Get("level")),
+		Source:     strings.TrimSpace(values.Get("source")),
+		ClientID:   strings.TrimSpace(values.Get("client_id")),
+		LocationID: strings.TrimSpace(values.Get("location_id")),
+		Query:      strings.TrimSpace(values.Get("q")),
+	}
+	if raw := strings.TrimSpace(values.Get("limit")); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit < 0 {
+			return observability.LogQuery{}, errors.New("limit must be a non-negative integer")
+		}
+		query.Limit = limit
+	}
+	if raw := strings.TrimSpace(values.Get("since")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return observability.LogQuery{}, errors.New("since must be RFC3339 time")
+		}
+		query.Since = parsed
+	}
+	if raw := strings.TrimSpace(values.Get("until")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			return observability.LogQuery{}, errors.New("until must be RFC3339 time")
+		}
+		query.Until = parsed
+	}
+	return query, nil
 }
 
 type credentialsRequest struct {
@@ -729,6 +843,41 @@ func (deps dependencies) requireSessionAdmin(w http.ResponseWriter, r *http.Requ
 		return requestAuth{}, false
 	}
 	return ctx, true
+}
+
+func (deps dependencies) overlayLocations(locations []clients.Location) []clients.Location {
+	statuses := deps.statusSnapshot()
+	for i := range locations {
+		locations[i] = overlayLocationStatus(locations[i], statuses)
+	}
+	return locations
+}
+
+func (deps dependencies) overlayLocation(location clients.Location) clients.Location {
+	return overlayLocationStatus(location, deps.statusSnapshot())
+}
+
+func (deps dependencies) statusSnapshot() map[string]supervisor.ProcessStatus {
+	if deps.statuses == nil {
+		return nil
+	}
+	return deps.statuses.StatusSnapshot()
+}
+
+func overlayLocationStatus(location clients.Location, statuses map[string]supervisor.ProcessStatus) clients.Location {
+	switch statuses[location.ID] {
+	case supervisor.ProcessRunning:
+		location.RuntimeStatus = string(supervisor.ProcessRunning)
+	case supervisor.ProcessStopped:
+		location.RuntimeStatus = string(supervisor.ProcessStopped)
+	case supervisor.ProcessFailed:
+		location.RuntimeStatus = string(supervisor.ProcessFailed)
+	default:
+		if location.RuntimeStatus == "" {
+			location.RuntimeStatus = string(supervisor.ProcessPending)
+		}
+	}
+	return location
 }
 
 func (deps dependencies) authenticateOptional(r *http.Request) (requestAuth, bool) {

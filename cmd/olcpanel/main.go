@@ -14,6 +14,7 @@ import (
 
 	"olcpanel/internal/config"
 	"olcpanel/internal/netstack"
+	"olcpanel/internal/observability"
 	"olcpanel/internal/server"
 	"olcpanel/internal/storage"
 	"olcpanel/internal/supervisor"
@@ -56,6 +57,7 @@ func serve(args []string) error {
 	olcrtcBinary := flags.String("olcrtc-binary", "", "OlcRTC binary path or name")
 	networkCIDR := flags.String("network-cidr", "", "runtime network CIDR for location namespaces")
 	trafficSampleInterval := flags.String("traffic-sample-interval", "", "traffic accounting sample interval")
+	logPath := flags.String("log-path", "", "panel JSONL log path")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -70,10 +72,17 @@ func serve(args []string) error {
 		OlcRTCBinary:          *olcrtcBinary,
 		NetworkCIDR:           *networkCIDR,
 		TrafficSampleInterval: *trafficSampleInterval,
+		LogPath:               *logPath,
 	})
 	if err != nil {
 		return err
 	}
+
+	logSink := observability.NewFileSink(cfg.LogPath)
+	slog.SetDefault(slog.New(observability.NewFanoutHandler(
+		slog.NewTextHandler(os.Stderr, nil),
+		observability.NewSlogHandler(logSink, "panel"),
+	)))
 
 	ctx := context.Background()
 	db, err := storage.Open(ctx, cfg.DatabaseURL)
@@ -90,6 +99,7 @@ func serve(args []string) error {
 	}
 	runtimeRunner := supervisor.NewProcessRunnerWithOptions(cfg.RuntimeDir, cfg.OlcRTCBinary, supervisor.ProcessRunnerOptions{
 		Netstack: netstackAdapter{stack: stack},
+		LogSink:  logSink,
 	})
 	processSupervisor := supervisor.New(db, supervisor.WithRunner(runtimeRunner))
 	if result, err := processSupervisor.Reload(ctx); err != nil {
@@ -136,7 +146,7 @@ func serve(args []string) error {
 
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddress,
-		Handler:           server.New(cfg, webui.Assets(), server.WithDatabase(db), server.WithSupervisor(processSupervisor)),
+		Handler:           server.New(cfg, webui.Assets(), server.WithDatabase(db), server.WithSupervisor(processSupervisor), server.WithLogStore(logSink)),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -336,7 +346,7 @@ func commandUsage() string {
 	return `olcpanel manages a local OlcRTC VPS panel.
 
 Usage:
-  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16] [--traffic-sample-interval 30s]
+  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16] [--traffic-sample-interval 30s] [--log-path /var/log/olcpanel/panel.log]
   olcpanel migrate [--database-url sqlite:///etc/olcpanel/panel.db]
   olcpanel doctor [--database-url sqlite:///etc/olcpanel/panel.db] [--network-cidr 10.255.0.0/16]
 
@@ -348,5 +358,6 @@ Environment:
   OLCPANEL_NETWORK_CIDR   Runtime network CIDR. Defaults to 10.255.0.0/16.
   OLCPANEL_TRAFFIC_SAMPLE_INTERVAL
                           Traffic accounting sample interval. Defaults to 30s.
+  OLCPANEL_LOG_PATH       Panel JSONL log path. Defaults to /var/log/olcpanel/panel.log.
 `
 }

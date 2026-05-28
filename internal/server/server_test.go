@@ -18,6 +18,8 @@ import (
 	"olcpanel/internal/auth"
 	"olcpanel/internal/clients"
 	"olcpanel/internal/config"
+	"olcpanel/internal/metrics"
+	"olcpanel/internal/observability"
 	"olcpanel/internal/server"
 	"olcpanel/internal/storage"
 	"olcpanel/internal/supervisor"
@@ -344,6 +346,156 @@ func TestAPIKeyCanCallReloadWithoutCSRF(t *testing.T) {
 	}
 	if body.Summary.Started != 1 || len(body.Actions) != 1 || body.Actions[0].Action != supervisor.ActionStarted || body.Actions[0].Reason != supervisor.ReasonNew {
 		t.Fatalf("reload response = %#v, want injected result", body)
+	}
+}
+
+func TestObservabilityRoutesRequireSetupAuthAndAllowSessionAndAPIKeyReads(t *testing.T) {
+	db := testDB(t)
+	logs := &fakeLogStore{entries: []observability.LogEntry{{
+		Time:    time.Date(2026, 5, 28, 10, 0, 0, 0, time.UTC),
+		Level:   "info",
+		Source:  "panel",
+		Message: "panel started",
+	}}}
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db), server.WithLogStore(logs), server.WithMetricsHostReader(fakeMetricsHostReader{}))
+
+	beforeReq := httptest.NewRequest(http.MethodGet, "/api/v1/logs", nil)
+	beforeRec := httptest.NewRecorder()
+	handler.ServeHTTP(beforeRec, beforeReq)
+	if beforeRec.Code != http.StatusForbidden {
+		t.Fatalf("before setup status = %d, want %d", beforeRec.Code, http.StatusForbidden)
+	}
+
+	cookies, csrf := loginSession(t, handler)
+	sessionReq := httptest.NewRequest(http.MethodGet, "/api/v1/logs?format=text", nil)
+	for _, cookie := range cookies {
+		sessionReq.AddCookie(cookie)
+	}
+	sessionRec := httptest.NewRecorder()
+	handler.ServeHTTP(sessionRec, sessionReq)
+	if sessionRec.Code != http.StatusOK {
+		t.Fatalf("session logs status = %d, want %d, body: %s", sessionRec.Code, http.StatusOK, sessionRec.Body.String())
+	}
+	if !strings.Contains(sessionRec.Body.String(), "panel started") || sessionRec.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
+		t.Fatalf("text logs response = %q content-type %q", sessionRec.Body.String(), sessionRec.Header().Get("Content-Type"))
+	}
+
+	token := createAPIKeyWithSession(t, handler, cookies, csrf)
+	metricsReq := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+	metricsReq.Header.Set("Authorization", "Bearer "+token)
+	metricsRec := httptest.NewRecorder()
+	handler.ServeHTTP(metricsRec, metricsReq)
+	if metricsRec.Code != http.StatusOK {
+		t.Fatalf("api key metrics status = %d, want %d, body: %s", metricsRec.Code, http.StatusOK, metricsRec.Body.String())
+	}
+}
+
+func TestObservabilityRoutesReturnUnauthorizedAfterSetup(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db), server.WithLogStore(&fakeLogStore{}), server.WithMetricsHostReader(fakeMetricsHostReader{}))
+	if _, err := auth.CreateFirstAdmin(context.Background(), db, "admin", "correct horse battery"); err != nil {
+		t.Fatalf("CreateFirstAdmin returned error: %v", err)
+	}
+
+	for _, path := range []string{"/api/v1/logs", "/api/v1/metrics"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status = %d, want %d", path, rec.Code, http.StatusUnauthorized)
+		}
+	}
+}
+
+func TestMetricsEndpointIncludesSeededRuntimeStatusAndQuotaSummary(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(
+		config.Config{BindAddress: "127.0.0.1:8888"},
+		testAssets(),
+		server.WithDatabase(db),
+		server.WithMetricsHostReader(fakeMetricsHostReader{}),
+		server.WithSupervisor(&fakeRuntimeSupervisor{statuses: map[string]supervisor.ProcessStatus{}}),
+	)
+	cookies, csrf := loginSession(t, handler)
+	clientID := createClientViaSession(t, handler, cookies, csrf, `{"name":"Client","quota_bytes":100}`)
+	locationReq := httptest.NewRequest(http.MethodPost, "/api/v1/clients/"+clientID+"/locations", bytes.NewBufferString(`{"name":"Main","provider":"wbstream","transport":"datachannel"}`))
+	locationReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		locationReq.AddCookie(cookie)
+	}
+	locationRec := httptest.NewRecorder()
+	handler.ServeHTTP(locationRec, locationReq)
+	if locationRec.Code != http.StatusOK {
+		t.Fatalf("create location status = %d, want %d, body: %s", locationRec.Code, http.StatusOK, locationRec.Body.String())
+	}
+	var createdLocation struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(locationRec.Body.Bytes(), &createdLocation); err != nil {
+		t.Fatalf("location response is not JSON: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `UPDATE clients SET quota_used_bytes = 80 WHERE id = ?`, clientID); err != nil {
+		t.Fatalf("mark quota warning: %v", err)
+	}
+
+	handler = server.New(
+		config.Config{BindAddress: "127.0.0.1:8888"},
+		testAssets(),
+		server.WithDatabase(db),
+		server.WithMetricsHostReader(fakeMetricsHostReader{}),
+		server.WithSupervisor(&fakeRuntimeSupervisor{statuses: map[string]supervisor.ProcessStatus{createdLocation.ID: supervisor.ProcessFailed}}),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var body metrics.Snapshot
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("metrics response is not JSON: %v", err)
+	}
+	if body.Clients.Total != 1 || body.Locations.Total != 1 || body.Processes.Failed != 1 || body.Quotas.Warning != 1 || body.Traffic.TotalBytes != 80 {
+		t.Fatalf("metrics body = %#v, want seeded counts and failed process", body)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/clients/"+clientID+"/locations", nil)
+	for _, cookie := range cookies {
+		listReq.AddCookie(cookie)
+	}
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("list locations status = %d, want %d, body: %s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var locations []struct {
+		ID            string `json:"id"`
+		RuntimeStatus string `json:"runtime_status"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &locations); err != nil {
+		t.Fatalf("locations response is not JSON: %v", err)
+	}
+	if len(locations) != 1 || locations[0].RuntimeStatus != "failed" {
+		t.Fatalf("locations = %#v, want failed runtime status overlay", locations)
+	}
+}
+
+func TestLogsEndpointReturnsUnavailableWhenLogStoreMissing(t *testing.T) {
+	db := testDB(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888"}, testAssets(), server.WithDatabase(db))
+	cookies, _ := loginSession(t, handler)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/logs", nil)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -1027,6 +1179,33 @@ func (reloader *fakeReloader) Reload(context.Context) (supervisor.ReloadResult, 
 	return reloader.result, reloader.err
 }
 
+type fakeRuntimeSupervisor struct {
+	fakeReloader
+	statuses map[string]supervisor.ProcessStatus
+}
+
+func (supervisor *fakeRuntimeSupervisor) StatusSnapshot() map[string]supervisor.ProcessStatus {
+	return supervisor.statuses
+}
+
+type fakeLogStore struct {
+	entries []observability.LogEntry
+	err     error
+}
+
+func (store *fakeLogStore) Query(_ context.Context, query observability.LogQuery) ([]observability.LogEntry, error) {
+	if store.err != nil {
+		return nil, store.err
+	}
+	return store.entries, nil
+}
+
+type fakeMetricsHostReader struct{}
+
+func (fakeMetricsHostReader) ReadHost(context.Context) (metrics.HostSnapshot, error) {
+	return metrics.HostSnapshot{}, nil
+}
+
 func loginSession(t *testing.T, handler http.Handler) ([]*http.Cookie, string) {
 	t.Helper()
 	setupReq := httptest.NewRequest(http.MethodPost, "/api/v1/setup", bytes.NewBufferString(`{"username":"admin","password":"correct horse battery"}`))
@@ -1065,6 +1244,27 @@ func createAPIKey(t *testing.T, handler http.Handler) string {
 		t.Fatalf("create key response is not JSON: %v", err)
 	}
 	return body.Token
+}
+
+func createAPIKeyWithSession(t *testing.T, handler http.Handler, cookies []*http.Cookie, csrf string) string {
+	t.Helper()
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/api-keys", bytes.NewBufferString(`{"name":"automation"}`))
+	createReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		createReq.AddCookie(cookie)
+	}
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("create key status = %d, want %d, body: %s", createRec.Code, http.StatusOK, createRec.Body.String())
+	}
+	var created struct {
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("create key response is not JSON: %v", err)
+	}
+	return created.Token
 }
 
 func createClientViaSession(t *testing.T, handler http.Handler, cookies []*http.Cookie, csrf string, body string) string {

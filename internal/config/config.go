@@ -13,6 +13,7 @@ const (
 	DefaultOlcRTCBinary          = "olcrtc"
 	DefaultNetworkCIDR           = "10.255.0.0/16"
 	DefaultTrafficSampleInterval = 30 * time.Second
+	DefaultLogPath               = "/var/log/olcpanel/panel.log"
 )
 
 type Config struct {
@@ -22,6 +23,7 @@ type Config struct {
 	OlcRTCBinary          string
 	NetworkCIDR           string
 	TrafficSampleInterval time.Duration
+	LogPath               string
 }
 
 type LoadOptions struct {
@@ -31,6 +33,7 @@ type LoadOptions struct {
 	OlcRTCBinary          string
 	NetworkCIDR           string
 	TrafficSampleInterval string
+	LogPath               string
 }
 
 func Load() (Config, error) {
@@ -89,6 +92,14 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		}
 	}
 
+	logPath := os.Getenv("OLCPANEL_LOG_PATH")
+	if logPath == "" {
+		logPath = DefaultLogPath
+	}
+	if options.LogPath != "" {
+		logPath = options.LogPath
+	}
+
 	return Config{
 		BindAddress:           bindAddress,
 		DatabaseURL:           databaseURL,
@@ -96,6 +107,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		OlcRTCBinary:          olcrtcBinary,
 		NetworkCIDR:           networkCIDR,
 		TrafficSampleInterval: trafficSampleInterval,
+		LogPath:               logPath,
 	}, nil
 }
 

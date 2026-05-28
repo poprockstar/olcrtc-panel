@@ -1,15 +1,19 @@
 package supervisor
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"olcpanel/internal/netstack"
+	"olcpanel/internal/observability"
 	"olcpanel/internal/runtimeconfig"
 )
 
@@ -20,6 +24,7 @@ const (
 	ProcessRunning ProcessStatus = "running"
 	ProcessStopped ProcessStatus = "stopped"
 	ProcessFailed  ProcessStatus = "failed"
+	ProcessPending ProcessStatus = "pending"
 )
 
 type ProcessRunner struct {
@@ -28,6 +33,7 @@ type ProcessRunner struct {
 	binary     string
 	ipBinary   string
 	netstack   NetworkStack
+	logSink    processLogSink
 	mu         sync.Mutex
 	processes  map[string]*managedProcess
 	statuses   map[string]ProcessStatus
@@ -41,6 +47,11 @@ type NetworkStack interface {
 type ProcessRunnerOptions struct {
 	Netstack NetworkStack
 	IPBinary string
+	LogSink  processLogSink
+}
+
+type processLogSink interface {
+	Append(context.Context, observability.LogEntry) error
 }
 
 type managedProcess struct {
@@ -64,6 +75,7 @@ func NewProcessRunnerWithOptions(runtimeDir, binary string, options ProcessRunne
 		binary:     binary,
 		ipBinary:   ipBinary,
 		netstack:   options.Netstack,
+		logSink:    options.LogSink,
 		processes:  make(map[string]*managedProcess),
 		statuses:   make(map[string]ProcessStatus),
 	}
@@ -101,8 +113,8 @@ func (runner *ProcessRunner) Start(ctx context.Context, state LocationState) err
 	}
 
 	cmd := runner.command(state, configPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = runner.outputWriter(state, "olcrtc_stdout", os.Stdout)
+	cmd.Stderr = runner.outputWriter(state, "olcrtc_stderr", os.Stderr)
 	if err := cmd.Start(); err != nil {
 		runner.cleanupNetwork(ctx, state)
 		return fmt.Errorf("start %s for location %s: %w", runner.binary, state.LocationID, err)
@@ -118,10 +130,64 @@ func (runner *ProcessRunner) Start(ctx context.Context, state LocationState) err
 	return nil
 }
 
+func (runner *ProcessRunner) outputWriter(state LocationState, source string, stream io.Writer) io.Writer {
+	if runner.logSink == nil {
+		return stream
+	}
+	return io.MultiWriter(stream, &lineLogWriter{
+		sink:       runner.logSink,
+		source:     source,
+		clientID:   state.ClientID,
+		locationID: state.LocationID,
+	})
+}
+
 func (runner *ProcessRunner) hasProcess(locationID string) bool {
 	runner.mu.Lock()
 	defer runner.mu.Unlock()
 	return runner.processes[locationID] != nil
+}
+
+type lineLogWriter struct {
+	sink       processLogSink
+	source     string
+	clientID   string
+	locationID string
+	mu         sync.Mutex
+	buffer     []byte
+}
+
+func (writer *lineLogWriter) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.buffer = append(writer.buffer, data...)
+	for {
+		index := bytes.IndexByte(writer.buffer, '\n')
+		if index < 0 {
+			break
+		}
+		line := string(writer.buffer[:index])
+		writer.buffer = append([]byte(nil), writer.buffer[index+1:]...)
+		writer.append(line)
+	}
+	return len(data), nil
+}
+
+func (writer *lineLogWriter) append(line string) {
+	line = strings.TrimRight(line, "\r")
+	if line == "" {
+		return
+	}
+	if err := writer.sink.Append(context.Background(), observability.LogEntry{
+		Time:       time.Now().UTC(),
+		Level:      "info",
+		Source:     writer.source,
+		ClientID:   writer.clientID,
+		LocationID: writer.locationID,
+		Message:    line,
+	}); err != nil {
+		slog.Warn("failed to capture olcrtc process output", "source", writer.source, "location_id", writer.locationID, "error", err)
+	}
 }
 
 func (runner *ProcessRunner) Restart(ctx context.Context, oldState, newState LocationState) error {

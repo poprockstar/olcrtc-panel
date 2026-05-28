@@ -20,9 +20,9 @@ func TestServeRejectsUnexpectedArgument(t *testing.T) {
 	}
 }
 
-func TestUsageIncludesDoctorNetworkCIDRAndTrafficSampleInterval(t *testing.T) {
+func TestUsageIncludesDoctorNetworkCIDRAndTrafficSampleIntervalAndLogPath(t *testing.T) {
 	usage := commandUsage()
-	for _, want := range []string{"olcpanel doctor", "--network-cidr", "OLCPANEL_NETWORK_CIDR", "--traffic-sample-interval", "OLCPANEL_TRAFFIC_SAMPLE_INTERVAL"} {
+	for _, want := range []string{"olcpanel doctor", "--network-cidr", "OLCPANEL_NETWORK_CIDR", "--traffic-sample-interval", "OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", "--log-path", "OLCPANEL_LOG_PATH"} {
 		if !strings.Contains(usage, want) {
 			t.Fatalf("usage does not contain %q:\n%s", want, usage)
 		}

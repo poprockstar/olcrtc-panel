@@ -77,6 +77,27 @@ func TestReloadRestartsDesiredLocationAfterRunnerReportsFailed(t *testing.T) {
 	}
 }
 
+func TestStatusSnapshotReturnsRunnerStatusesForKnownLocations(t *testing.T) {
+	db := testDB(t)
+	client, running := seedClientLocation(t, db)
+	failed := createLocation(t, db, client.ID, "Failed", "wbstream", "datachannel")
+	runner := &recordingRunner{statuses: make(map[string]supervisor.ProcessStatus)}
+	sup := supervisor.New(db, supervisor.WithRunner(runner), supervisor.WithClock(fixedClock()))
+	if _, err := sup.Reload(context.Background()); err != nil {
+		t.Fatalf("Reload returned error: %v", err)
+	}
+	runner.statuses[failed.ID] = supervisor.ProcessFailed
+
+	snapshot := sup.StatusSnapshot()
+	if snapshot[running.ID] != supervisor.ProcessRunning || snapshot[failed.ID] != supervisor.ProcessFailed {
+		t.Fatalf("snapshot = %#v, want running and failed statuses", snapshot)
+	}
+	snapshot[running.ID] = supervisor.ProcessStopped
+	if fresh := sup.StatusSnapshot(); fresh[running.ID] != supervisor.ProcessRunning {
+		t.Fatalf("mutating returned snapshot changed supervisor state: %#v", fresh)
+	}
+}
+
 func TestReloadStopsFailedLocationWhenItBecomesInactive(t *testing.T) {
 	db := testDB(t)
 	client, location := seedClientLocation(t, db)

@@ -67,6 +67,7 @@ func TestLoadUsesDefaultRuntimeConfig(t *testing.T) {
 func TestLoadUsesDefaultNetworkCIDR(t *testing.T) {
 	t.Setenv("OLCPANEL_NETWORK_CIDR", "")
 	t.Setenv("OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", "")
+	t.Setenv("OLCPANEL_LOG_PATH", "")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -78,6 +79,9 @@ func TestLoadUsesDefaultNetworkCIDR(t *testing.T) {
 	}
 	if cfg.TrafficSampleInterval != 30*time.Second {
 		t.Fatalf("TrafficSampleInterval = %s, want 30s", cfg.TrafficSampleInterval)
+	}
+	if cfg.LogPath != "/var/log/olcpanel/panel.log" {
+		t.Fatalf("LogPath = %q, want default panel log path", cfg.LogPath)
 	}
 }
 
@@ -186,6 +190,34 @@ func TestLoadAllowsTrafficSampleIntervalCLIOverride(t *testing.T) {
 
 	if cfg.TrafficSampleInterval != 2*time.Minute {
 		t.Fatalf("TrafficSampleInterval = %s, want 2m", cfg.TrafficSampleInterval)
+	}
+}
+
+func TestLoadAllowsLogPathEnvOverride(t *testing.T) {
+	t.Setenv("OLCPANEL_LOG_PATH", "/tmp/olcpanel/panel.log")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.LogPath != "/tmp/olcpanel/panel.log" {
+		t.Fatalf("LogPath = %q, want env override", cfg.LogPath)
+	}
+}
+
+func TestLoadAllowsLogPathCLIOverride(t *testing.T) {
+	t.Setenv("OLCPANEL_LOG_PATH", "/tmp/from-env.log")
+
+	cfg, err := config.LoadWithOptions(config.LoadOptions{
+		LogPath: "/tmp/from-cli.log",
+	})
+	if err != nil {
+		t.Fatalf("LoadWithOptions returned error: %v", err)
+	}
+
+	if cfg.LogPath != "/tmp/from-cli.log" {
+		t.Fatalf("LogPath = %q, want CLI override", cfg.LogPath)
 	}
 }
 
