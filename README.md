@@ -52,6 +52,14 @@ Run locally with an explicit SQLite database:
 ./bin/olcpanel serve --database-url sqlite:///tmp/olcpanel.db
 ```
 
+Run with explicit OlcRTC runtime paths:
+
+```bash
+./bin/olcpanel serve \
+  --runtime-dir /var/lib/olcpanel/runtime \
+  --olcrtc-binary /usr/local/bin/olcrtc
+```
+
 Apply database migrations without starting the server:
 
 ```bash
@@ -62,6 +70,20 @@ The default database URL is `sqlite:///etc/olcpanel/panel.db`. Override it with
 `OLCPANEL_DATABASE_URL` or the `--database-url` flag. PostgreSQL-style URLs
 (`postgres://` and `postgresql://`) are recognized structurally, but Phase 2
 runtime verification is SQLite-focused.
+
+The runtime config directory defaults to `/var/lib/olcpanel/runtime`. Override
+it with `OLCPANEL_RUNTIME_DIR` or `--runtime-dir`. For each eligible location,
+the supervisor writes `<runtime-dir>/<location_id>/server.yaml` with private
+file permissions and launches the configured OlcRTC binary as:
+
+```bash
+olcrtc <runtime-dir>/<location_id>/server.yaml
+```
+
+The OlcRTC binary defaults to `olcrtc` on `PATH`. Override it with
+`OLCPANEL_OLCRTC_BINARY` or `--olcrtc-binary`. If the binary is missing, the
+panel still starts; reloads that need to launch active locations fail clearly
+and can be retried after installing or pointing to the binary.
 
 Check state:
 

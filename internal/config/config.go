@@ -3,18 +3,24 @@ package config
 import "os"
 
 const (
-	DefaultBindAddress = "127.0.0.1:8888"
-	DefaultDatabaseURL = "sqlite:///etc/olcpanel/panel.db"
+	DefaultBindAddress  = "127.0.0.1:8888"
+	DefaultDatabaseURL  = "sqlite:///etc/olcpanel/panel.db"
+	DefaultRuntimeDir   = "/var/lib/olcpanel/runtime"
+	DefaultOlcRTCBinary = "olcrtc"
 )
 
 type Config struct {
-	BindAddress string
-	DatabaseURL string
+	BindAddress  string
+	DatabaseURL  string
+	RuntimeDir   string
+	OlcRTCBinary string
 }
 
 type LoadOptions struct {
-	BindAddress string
-	DatabaseURL string
+	BindAddress  string
+	DatabaseURL  string
+	RuntimeDir   string
+	OlcRTCBinary string
 }
 
 func Load() (Config, error) {
@@ -38,8 +44,26 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		databaseURL = options.DatabaseURL
 	}
 
+	runtimeDir := os.Getenv("OLCPANEL_RUNTIME_DIR")
+	if runtimeDir == "" {
+		runtimeDir = DefaultRuntimeDir
+	}
+	if options.RuntimeDir != "" {
+		runtimeDir = options.RuntimeDir
+	}
+
+	olcrtcBinary := os.Getenv("OLCPANEL_OLCRTC_BINARY")
+	if olcrtcBinary == "" {
+		olcrtcBinary = DefaultOlcRTCBinary
+	}
+	if options.OlcRTCBinary != "" {
+		olcrtcBinary = options.OlcRTCBinary
+	}
+
 	return Config{
-		BindAddress: bindAddress,
-		DatabaseURL: databaseURL,
+		BindAddress:  bindAddress,
+		DatabaseURL:  databaseURL,
+		RuntimeDir:   runtimeDir,
+		OlcRTCBinary: olcrtcBinary,
 	}, nil
 }

@@ -45,6 +45,23 @@ func TestLoadUsesDefaultDatabaseURL(t *testing.T) {
 	}
 }
 
+func TestLoadUsesDefaultRuntimeConfig(t *testing.T) {
+	t.Setenv("OLCPANEL_RUNTIME_DIR", "")
+	t.Setenv("OLCPANEL_OLCRTC_BINARY", "")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.RuntimeDir != "/var/lib/olcpanel/runtime" {
+		t.Fatalf("RuntimeDir = %q, want default runtime dir", cfg.RuntimeDir)
+	}
+	if cfg.OlcRTCBinary != "olcrtc" {
+		t.Fatalf("OlcRTCBinary = %q, want default binary", cfg.OlcRTCBinary)
+	}
+}
+
 func TestLoadAllowsDatabaseURLEnvOverride(t *testing.T) {
 	t.Setenv("OLCPANEL_DATABASE_URL", "sqlite:///tmp/olcpanel-test.db")
 
@@ -70,5 +87,42 @@ func TestLoadAllowsDatabaseURLCLIOverride(t *testing.T) {
 
 	if cfg.DatabaseURL != "sqlite:///tmp/from-cli.db" {
 		t.Fatalf("DatabaseURL = %q, want CLI override", cfg.DatabaseURL)
+	}
+}
+
+func TestLoadAllowsRuntimeEnvOverrides(t *testing.T) {
+	t.Setenv("OLCPANEL_RUNTIME_DIR", "/tmp/olcpanel-runtime")
+	t.Setenv("OLCPANEL_OLCRTC_BINARY", "/usr/local/bin/olcrtc")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.RuntimeDir != "/tmp/olcpanel-runtime" {
+		t.Fatalf("RuntimeDir = %q, want env override", cfg.RuntimeDir)
+	}
+	if cfg.OlcRTCBinary != "/usr/local/bin/olcrtc" {
+		t.Fatalf("OlcRTCBinary = %q, want env override", cfg.OlcRTCBinary)
+	}
+}
+
+func TestLoadAllowsRuntimeCLIOverrides(t *testing.T) {
+	t.Setenv("OLCPANEL_RUNTIME_DIR", "/tmp/from-env")
+	t.Setenv("OLCPANEL_OLCRTC_BINARY", "olcrtc-from-env")
+
+	cfg, err := config.LoadWithOptions(config.LoadOptions{
+		RuntimeDir:   "/tmp/from-cli",
+		OlcRTCBinary: "olcrtc-from-cli",
+	})
+	if err != nil {
+		t.Fatalf("LoadWithOptions returned error: %v", err)
+	}
+
+	if cfg.RuntimeDir != "/tmp/from-cli" {
+		t.Fatalf("RuntimeDir = %q, want CLI override", cfg.RuntimeDir)
+	}
+	if cfg.OlcRTCBinary != "olcrtc-from-cli" {
+		t.Fatalf("OlcRTCBinary = %q, want CLI override", cfg.OlcRTCBinary)
 	}
 }

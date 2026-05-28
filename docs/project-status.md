@@ -13,7 +13,7 @@ Last updated: 2026-05-27
 
 ## Phase State
 
-- Current phase: Phase 6 - Supervisor And Reload Diff complete; Phase 7 - Runtime Config And Process Launch is next.
+- Current phase: Phase 7 - Runtime Config And Process Launch complete; Phase 8 - Netns, Veth, NAT, DNS, And TC is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -22,7 +22,8 @@ Last updated: 2026-05-27
   - Phase 4 - Clients And Locations Domain API
   - Phase 5 - Subscription Rendering
   - Phase 6 - Supervisor And Reload Diff
-- Next session target: start Phase 7 runtime config rendering and real OlcRTC process launch.
+  - Phase 7 - Runtime Config And Process Launch
+- Next session target: start Phase 8 network namespace, veth, NAT, DNS, and traffic-control reconciliation.
 
 ## Implemented Capabilities
 
@@ -93,6 +94,15 @@ Last updated: 2026-05-27
 - Authenticated `POST /api/v1/reload` added; browser sessions require CSRF and API-key requests bypass CSRF like other admin APIs.
 - `olcpanel serve` now owns one supervisor instance and handles `SIGHUP` as a best-effort supervisor reload without terminating the server on reload failure.
 - Standalone `olcpanel reload` remains deferred until daemon IPC or HTTP-client behavior is designed.
+- Runtime configuration options added:
+  - `OLCPANEL_RUNTIME_DIR` and `olcpanel serve --runtime-dir`, default `/var/lib/olcpanel/runtime`
+  - `OLCPANEL_OLCRTC_BINARY` and `olcpanel serve --olcrtc-binary`, default `olcrtc`
+- `internal/runtimeconfig` renders deterministic per-location server YAML at `<runtime-dir>/<location_id>/server.yaml`.
+- Runtime YAML includes `mode: srv`, `auth.provider`, `room.id`, `crypto.key`, `net.transport`, `net.dns`, `data: data`, and transport-specific `vp8`, `sei`, or `video` sections where required.
+- Runtime config writes are atomic where practical, create per-location directories with private permissions, and call `chmod 0600` for secret-bearing `server.yaml` files.
+- `internal/supervisor` now includes a real process runner that starts `olcrtc <server.yaml>`, restarts changed locations, stops removed or ineligible locations, and removes stopped location runtime directories.
+- Unexpected child exits are recorded as failed process status without an automatic restart loop.
+- `olcpanel serve` wires the real process runner and performs an initial best-effort supervisor reload; missing `olcrtc` prevents affected active locations from launching but does not prevent HTTP server startup.
 
 ## Phase 0 Architecture Review Notes
 
@@ -168,6 +178,15 @@ Last updated: 2026-05-27
 - Daemon reload status: `SIGHUP` calls the same supervisor reload path and logs the resulting counts; reload failures are logged and do not stop the HTTP server.
 - CLI reload status: standalone `olcpanel reload` was intentionally not added in Phase 6.
 
+## Phase 7 Completion Notes
+
+- Runtime path status: generated OlcRTC server configs are written under `/var/lib/olcpanel/runtime` by default, with CLI and environment overrides available.
+- OlcRTC binary status: runtime launch uses `olcrtc` by default and can be pointed at an absolute or alternate binary name.
+- Config renderer status: datachannel emits no extra transport section; VP8, SEI, and video transports map normalized payload fields to their documented YAML sections.
+- File permission status: Unix builds call `chmod 0600` for `server.yaml`; Windows verification cannot observe POSIX mode bits accurately, so the mode assertion is skipped on Windows while the chmod path remains covered by code review and Linux builds.
+- Process runner status: fake-process tests cover start, restart, stop cleanup, and unexpected child exit without automatic restart.
+- Startup behavior status: initial reload is best-effort so a missing `olcrtc` binary is logged clearly without preventing the panel from serving admin APIs.
+
 ## Review Hardening Fixes Notes
 
 - No new roadmap features were pulled forward.
@@ -241,14 +260,21 @@ Last updated: 2026-05-27
   - `npm --prefix frontend run build` passed.
   - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+- Phase 7:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin\olcpanel.exe .\cmd\olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
 
 ## Open Risks And Blockers
 
 - SQLite is the only Phase 2 runtime-verified database. PostgreSQL URLs are recognized, but PostgreSQL driver/runtime support remains a future implementation task.
 - Rate limiting is in-memory, keyed by direct `RemoteAddr`, and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
 - Frontend auth/setup/login and client/location screens are not implemented yet; operators must use direct API calls until Phase 11.
-- Phase 6 enforces disabled, expired, and stop-mode quota states only inside the in-memory supervisor; real process termination will matter once Phase 7 adds actual `olcrtc` launch.
-- `quota_lock_mode=disable_traffic` remains pending netns/tc traffic-control work and does not stop locations in Phase 6.
+- Real OlcRTC session verification remains a Linux deployment check; Phase 7 unit tests use fake executables to prove process lifecycle behavior.
+- Runtime process stdout/stderr currently inherit the panel service streams for systemd/journal capture; structured log APIs remain deferred to Phase 10.
+- Unexpected OlcRTC child exits are recorded internally as failed but are not surfaced through an admin API until observability work in Phase 10.
+- `quota_lock_mode=disable_traffic` remains pending netns/tc traffic-control work and does not stop locations in Phase 7.
 - Standalone CLI reload remains pending daemon IPC or HTTP-client design.
 - Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.

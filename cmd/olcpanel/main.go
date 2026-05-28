@@ -48,6 +48,8 @@ func serve(args []string) error {
 	flags.SetOutput(os.Stderr)
 	bind := flags.String("bind", "", "HTTP bind address")
 	databaseURL := flags.String("database-url", "", "database URL")
+	runtimeDir := flags.String("runtime-dir", "", "runtime directory for generated OlcRTC configs")
+	olcrtcBinary := flags.String("olcrtc-binary", "", "OlcRTC binary path or name")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -56,8 +58,10 @@ func serve(args []string) error {
 	}
 
 	cfg, err := config.LoadWithOptions(config.LoadOptions{
-		BindAddress: *bind,
-		DatabaseURL: *databaseURL,
+		BindAddress:  *bind,
+		DatabaseURL:  *databaseURL,
+		RuntimeDir:   *runtimeDir,
+		OlcRTCBinary: *olcrtcBinary,
 	})
 	if err != nil {
 		return err
@@ -72,7 +76,20 @@ func serve(args []string) error {
 	if err := storage.Migrate(ctx, db); err != nil {
 		return err
 	}
-	processSupervisor := supervisor.New(db)
+	runtimeRunner := supervisor.NewProcessRunner(cfg.RuntimeDir, cfg.OlcRTCBinary)
+	processSupervisor := supervisor.New(db, supervisor.WithRunner(runtimeRunner))
+	if result, err := processSupervisor.Reload(ctx); err != nil {
+		slog.Error("initial supervisor reload failed", "error", err)
+	} else {
+		slog.Info(
+			"initial supervisor reload applied",
+			"started", result.Summary.Started,
+			"restarted", result.Summary.Restarted,
+			"stopped", result.Summary.Stopped,
+			"unchanged", result.Summary.Unchanged,
+			"skipped", result.Summary.Skipped,
+		)
+	}
 
 	httpServer := &http.Server{
 		Addr:              cfg.BindAddress,
@@ -180,11 +197,13 @@ func commandUsage() string {
 	return `olcpanel manages a local OlcRTC VPS panel.
 
 Usage:
-  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db]
+  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc]
   olcpanel migrate [--database-url sqlite:///etc/olcpanel/panel.db]
 
 Environment:
-  OLCPANEL_BIND          HTTP bind address. Defaults to 127.0.0.1:8888.
-  OLCPANEL_DATABASE_URL  Database URL. Defaults to sqlite:///etc/olcpanel/panel.db.
+  OLCPANEL_BIND           HTTP bind address. Defaults to 127.0.0.1:8888.
+  OLCPANEL_DATABASE_URL   Database URL. Defaults to sqlite:///etc/olcpanel/panel.db.
+  OLCPANEL_RUNTIME_DIR    Runtime config directory. Defaults to /var/lib/olcpanel/runtime.
+  OLCPANEL_OLCRTC_BINARY  OlcRTC binary path or name. Defaults to olcrtc.
 `
 }
