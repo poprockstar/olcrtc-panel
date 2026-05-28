@@ -46,6 +46,9 @@ Last updated: 2026-05-27
 - `olcpanel serve` opens the configured database and runs migrations before starting HTTP.
 - `GET /api/v1/settings` and `PUT /api/v1/settings` added for core settings.
 - Settings validation added for locale, quota lock mode, and non-empty backup path.
+- Frontend top-level dependencies updated to React 19.2.6, Vite 8.0.14, TypeScript 6.0.3, and matching React/Vite type/plugin packages.
+- Backend SQLite dependency updated to `modernc.org/sqlite v1.50.1`; `go mod tidy` refreshed required indirect dependencies.
+- Standard Vite client ambient declarations added so TypeScript 6 accepts CSS side-effect imports.
 
 ## Phase 0 Architecture Review Notes
 
@@ -80,6 +83,13 @@ Last updated: 2026-05-27
   - `quota_lock_mode`: `stop` or `disable_traffic`
 - Transitional security state: settings endpoints are intentionally unauthenticated until Phase 3.
 
+## Dependency Update Notes
+
+- No API, route, database schema, CLI, or intended UI behavior changes were made.
+- Embedded frontend assets in `internal/webui/dist/` were rebuilt after the dependency update.
+- `go mod tidy` raised the module directive from `go 1.23.0` to `go 1.25.0` for the selected `modernc.org/sqlite v1.50.1` dependency set.
+- TypeScript 6 required adding `frontend/src/vite-env.d.ts` for Vite's CSS module declarations.
+
 ## Test Status
 
 - Phase 0: documentation-only; no automated tests required.
@@ -103,6 +113,12 @@ Last updated: 2026-05-27
   - `npm --prefix frontend run build` passed.
   - `go build -o bin\olcpanel.exe .\cmd\olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed.
+- Dependency update:
+  - `npm --prefix frontend install` passed; audit reported 0 vulnerabilities.
+  - `npm --prefix frontend run build` passed with TypeScript 6.0.3 and Vite 8.0.14.
+  - `go test ./...` passed.
+  - `go build -o bin/olcpanel.exe ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
 
 ## Open Risks And Blockers
 
@@ -111,6 +127,7 @@ Last updated: 2026-05-27
 - Settings endpoints are unauthenticated until Phase 3 and should not be exposed beyond the local bind address.
 - Current verification ran from Windows, but production assumptions and later e2e tests must target Linux servers.
 - Linux netns/veth/tc/root tests will require an isolated Linux environment and must stay separate from normal unit tests.
+- The updated Go dependency set now records `go 1.25.0`; future environments need a compatible Go toolchain.
 
 ## Architecture Compliance Checklist
 
