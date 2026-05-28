@@ -69,14 +69,47 @@ Check state:
 curl http://127.0.0.1:8888/api/v1/state
 ```
 
-Read or replace core settings:
+Create the first admin account. This endpoint only works while
+`setup_required` is `true`:
 
 ```bash
-curl http://127.0.0.1:8888/api/v1/settings
-curl -X PUT http://127.0.0.1:8888/api/v1/settings \
+curl -c cookies.txt -X POST http://127.0.0.1:8888/api/v1/setup \
   -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"correct horse battery"}'
+```
+
+The setup and login responses include a `csrf_token`. Browser-session mutation
+requests must send that value in `X-CSRF-Token`:
+
+```bash
+curl -b cookies.txt http://127.0.0.1:8888/api/v1/settings
+curl -b cookies.txt -X PUT http://127.0.0.1:8888/api/v1/settings \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF_TOKEN" \
   -d '{"ui_locale":"en","public_client_endpoint_enabled":false,"backup_path":"/var/lib/olcpanel/backups","quota_lock_mode":"stop"}'
 ```
 
-Settings endpoints are temporarily unauthenticated until the Phase 3 auth and
-security baseline is implemented.
+Log in after setup:
+
+```bash
+curl -c cookies.txt -X POST http://127.0.0.1:8888/api/v1/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"correct horse battery"}'
+```
+
+Create an API key from an authenticated browser session. The raw `olcp_...`
+token is returned only once:
+
+```bash
+curl -b cookies.txt -X POST http://127.0.0.1:8888/api/v1/api-keys \
+  -H 'Content-Type: application/json' \
+  -H "X-CSRF-Token: $CSRF_TOKEN" \
+  -d '{"name":"deploy"}'
+```
+
+API keys can authenticate protected admin APIs without CSRF:
+
+```bash
+curl -H "Authorization: Bearer $OLCPANEL_API_TOKEN" \
+  http://127.0.0.1:8888/api/v1/settings
+```

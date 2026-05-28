@@ -13,12 +13,13 @@ Last updated: 2026-05-27
 
 ## Phase State
 
-- Current phase: Phase 3 - Auth And Security Baseline
+- Current phase: Phase 4 - Clients And Locations Domain API
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
   - Phase 2 - Storage, Migrations, And Settings
-- Next session target: start Phase 3 auth, session security, API protection, and first-run setup
+  - Phase 3 - Auth And Security Baseline
+- Next session target: start Phase 4 client and location domain APIs
 
 ## Implemented Capabilities
 
@@ -49,6 +50,16 @@ Last updated: 2026-05-27
 - Frontend top-level dependencies updated to React 19.2.6, Vite 8.0.14, TypeScript 6.0.3, and matching React/Vite type/plugin packages.
 - Backend SQLite dependency updated to `modernc.org/sqlite v1.50.1`; `go mod tidy` refreshed required indirect dependencies.
 - Standard Vite client ambient declarations added so TypeScript 6 accepts CSS side-effect imports.
+- Auth package added with bcrypt password hashing, first-admin setup, login verification, secure random sessions, CSRF tokens, API token generation, SHA-256 token hashing, and in-memory rate limiting.
+- Phase 3 migration adds CSRF metadata and auth indexes for sessions/API keys.
+- `POST /api/v1/setup`, `POST /api/v1/login`, and `POST /api/v1/logout` added.
+- `GET /api/v1/api-keys`, `POST /api/v1/api-keys`, and `DELETE /api/v1/api-keys/{id}` added for session-authenticated admins.
+- Existing settings APIs are now protected: before setup they return setup-required errors; after setup they require a valid session or API key.
+- Browser session mutations require `X-CSRF-Token`; API key requests use `Authorization: Bearer olcp_...` and bypass CSRF.
+- `/api/v1/state` now reads setup status from the users table and reports authenticated state for valid session/API-key requests.
+- Session cookies are `HttpOnly`, `SameSite=Lax`, path `/`, and set `Secure` for HTTPS or `X-Forwarded-Proto: https`.
+- Unsafe browser requests with an `Origin` header are checked against same-origin before CSRF-protected mutations.
+- README updated with first-run setup, login, session CSRF, and API-key examples.
 
 ## Phase 0 Architecture Review Notes
 
@@ -82,6 +93,16 @@ Last updated: 2026-05-27
   - `backup_path`: non-empty path, default `/var/lib/olcpanel/backups`
   - `quota_lock_mode`: `stop` or `disable_traffic`
 - Transitional security state: settings endpoints are intentionally unauthenticated until Phase 3.
+
+## Phase 3 Completion Notes
+
+- Schema version: `2` (`002_phase3_auth.sql`).
+- Auth status: first admin setup is single-use; username policy is 3-64 characters and passwords require at least 12 characters.
+- Session status: login/setup issue an HTTP-only session cookie plus a CSRF token; logout revokes the current session and clears the cookie.
+- API key status: raw API tokens are prefixed with `olcp_`, stored only as SHA-256 hashes, returned only at creation, and can be revoked.
+- Admin API protection: settings and API-key management are blocked before setup; settings accepts session or API-key auth after setup; API-key management itself requires a browser admin session.
+- Rate limiting status: setup attempts, login failures, and repeated failed API-key auth are limited in memory for the v1 local-node deployment.
+- Frontend auth UI remains deferred to Phase 11.
 
 ## Dependency Update Notes
 
@@ -119,12 +140,17 @@ Last updated: 2026-05-27
   - `go test ./...` passed.
   - `go build -o bin/olcpanel.exe ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+- Phase 3:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run build` passed.
+  - `go build -o bin/olcpanel.exe ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
 
 ## Open Risks And Blockers
 
-- Work continued in the existing checkout on `master` because the plan explicitly required preserving dirty Phase 1 changes already present in this workspace.
 - SQLite is the only Phase 2 runtime-verified database. PostgreSQL URLs are recognized, but PostgreSQL driver/runtime support remains a future implementation task.
-- Settings endpoints are unauthenticated until Phase 3 and should not be exposed beyond the local bind address.
+- Phase 3 rate limiting is in-memory and resets on process restart, which is acceptable for v1 local-node scope but not a distributed deployment model.
+- Frontend auth/setup/login screens are not implemented yet; operators must use direct API calls until Phase 11.
 - Current verification ran from Windows, but production assumptions and later e2e tests must target Linux servers.
 - Linux netns/veth/tc/root tests will require an isolated Linux environment and must stay separate from normal unit tests.
 - The updated Go dependency set now records `go 1.25.0`; future environments need a compatible Go toolchain.

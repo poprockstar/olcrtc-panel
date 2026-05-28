@@ -2,7 +2,10 @@ module olcpanel
 
 go 1.25.0
 
-require modernc.org/sqlite v1.50.1
+require (
+	golang.org/x/crypto v0.41.0
+	modernc.org/sqlite v1.50.1
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
