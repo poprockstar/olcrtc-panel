@@ -1,0 +1,12 @@
+.idea/
+.worktrees/
+worktrees/
+*.md
+!README.md
+docs/
+bin/
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+*.db
+*.log
