@@ -37,6 +37,22 @@ func TestInstallScriptPreparesOlcRTCRuntime(t *testing.T) {
 	)
 }
 
+func TestInstallScriptFallsBackToBuildingPanelFromSource(t *testing.T) {
+	script := readScript(t, "install.sh")
+
+	requireContainsAll(t, script,
+		"PANEL_SOURCE_DIR",
+		"PANEL_CACHE_DIR",
+		"build_olcpanel",
+		"OLCPANEL_REPO_URL",
+		"OLCPANEL_REF",
+		"OLCPANEL_NO_CACHE",
+		`if curl -fL "${archive_url}" -o "${tmp}/olcpanel-linux-amd64.tar.gz"; then`,
+		"Building olcpanel from source",
+		"go build -trimpath -ldflags='-s -w' -o olcpanel ./cmd/olcpanel",
+	)
+}
+
 func TestUpdateScriptUpdatesAndRollsBackOlcRTC(t *testing.T) {
 	script := readScript(t, "update.sh")
 
@@ -52,6 +68,22 @@ func TestUpdateScriptUpdatesAndRollsBackOlcRTC(t *testing.T) {
 		`BACKUP_OLCRTC_BIN="/usr/local/bin/olcrtc.bak"`,
 		"rollback",
 		`mv "${BACKUP_OLCRTC_BIN}" "${OLCRTC_BIN}"`,
+	)
+}
+
+func TestUpdateScriptFallsBackToBuildingPanelFromSource(t *testing.T) {
+	script := readScript(t, "update.sh")
+
+	requireContainsAll(t, script,
+		"PANEL_SOURCE_DIR",
+		"PANEL_CACHE_DIR",
+		"build_olcpanel",
+		"OLCPANEL_REPO_URL",
+		"OLCPANEL_REF",
+		"OLCPANEL_NO_CACHE",
+		`if curl -fL "${archive_url}" -o "${tmp}/olcpanel-linux-amd64.tar.gz"; then`,
+		"Building olcpanel from source",
+		"go build -trimpath -ldflags='-s -w' -o olcpanel ./cmd/olcpanel",
 	)
 }
 

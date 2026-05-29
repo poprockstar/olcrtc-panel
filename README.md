@@ -32,6 +32,10 @@ bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/maste
 `https://github.com/openlibrecommunity/olcrtc`, соберет бинарник `olcrtc` через
 Podman и положит его в `/usr/local/bin/olcrtc`.
 
+Бинарник панели скачивается из GitHub Releases. Если release-архив еще не
+опубликован или недоступен, установщик автоматически клонирует этот репозиторий
+и собирает `olcpanel` из исходников через тот же Go-образ.
+
 По умолчанию для сборки используется полностью указанное имя образа
 `docker.io/library/golang:1.26-alpine3.22`, чтобы Podman не зависел от
 настроек поиска short names. При необходимости образ можно переопределить:
@@ -52,6 +56,12 @@ commit:
 
 ```bash
 OLCRTC_REF=master bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/install.sh)
+```
+
+Для fallback-сборки панели можно аналогично закрепить источник:
+
+```bash
+OLCPANEL_REF=master bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/install.sh)
 ```
 
 После установки скрипт покажет адрес панели:
@@ -93,6 +103,8 @@ OLCRTC_REF=master OLCRTC_NO_CACHE=1 bash <(curl -Ls https://raw.githubuserconten
 - runtime-конфиги `olcrtc`: `/var/lib/olcpanel/runtime`;
 - исходники `olcrtc`: `/var/lib/olcpanel/olcrtc-src`;
 - кеш сборки `olcrtc`: `/var/cache/olcpanel/olcrtc`;
+- исходники панели для fallback-сборки: `/var/lib/olcpanel/panel-src`;
+- кеш fallback-сборки панели: `/var/cache/olcpanel/panel`;
 - резервные копии: `/var/lib/olcpanel/backups`;
 - логи панели: `/var/log/olcpanel/panel.log`;
 - systemd unit: `/etc/systemd/system/olcpanel.service`.

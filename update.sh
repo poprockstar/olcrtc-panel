@@ -11,6 +11,9 @@ DATA_DIR="/var/lib/olcpanel"
 OLCRTC_SOURCE_DIR="${DATA_DIR}/olcrtc-src"
 OLCRTC_CACHE_DIR="/var/cache/olcpanel/olcrtc"
 OLCRTC_IMAGE="${OLCRTC_IMAGE:-docker.io/library/golang:1.26-alpine3.22}"
+PANEL_SOURCE_DIR="${DATA_DIR}/panel-src"
+PANEL_CACHE_DIR="/var/cache/olcpanel/panel"
+PANEL_IMAGE="${PANEL_IMAGE:-${OLCRTC_IMAGE}}"
 
 install_system_dependencies() {
   export DEBIAN_FRONTEND=noninteractive
@@ -92,6 +95,52 @@ install_olcrtc() {
   install -m 0755 "${OLCRTC_SOURCE_DIR}/olcrtc" "${target}"
 }
 
+build_olcpanel() {
+  local target="${1:-${INSTALL_BIN}}"
+  local repo_url="${OLCPANEL_REPO_URL:-https://github.com/${REPO}.git}"
+  local ref="${OLCPANEL_REF:-${OLCPANEL_VERSION:-master}}"
+  local gomod_cache="${PANEL_CACHE_DIR}/gomod"
+  local gobuild_cache="${PANEL_CACHE_DIR}/gobuild"
+
+  install -d -m 0755 "${PANEL_SOURCE_DIR}" "${PANEL_CACHE_DIR}"
+  if [ "${OLCPANEL_NO_CACHE:-}" = "1" ]; then
+    chmod -R u+w "${gomod_cache}" "${gobuild_cache}" 2>/dev/null || true
+    rm -rf "${gomod_cache}" "${gobuild_cache}"
+  fi
+  install -d -m 0755 "${gomod_cache}" "${gobuild_cache}"
+
+  if [ ! -d "${PANEL_SOURCE_DIR}/.git" ]; then
+    rm -rf "${PANEL_SOURCE_DIR}"
+    git clone "${repo_url}" "${PANEL_SOURCE_DIR}"
+  else
+    git -C "${PANEL_SOURCE_DIR}" remote set-url origin "${repo_url}"
+    git -C "${PANEL_SOURCE_DIR}" fetch --tags origin
+  fi
+
+  if git -C "${PANEL_SOURCE_DIR}" rev-parse --verify --quiet "origin/${ref}^{commit}" >/dev/null; then
+    git -C "${PANEL_SOURCE_DIR}" checkout -B "${ref}" "origin/${ref}"
+  else
+    git -C "${PANEL_SOURCE_DIR}" checkout -f "${ref}"
+  fi
+
+  echo "Building olcpanel from source (${ref})."
+  podman pull "${PANEL_IMAGE}"
+  podman run --rm \
+    --network host \
+    -v "${PANEL_SOURCE_DIR}":/app:Z \
+    -v "${gomod_cache}":/go/pkg/mod:Z \
+    -v "${gobuild_cache}":/root/.cache/go-build:Z \
+    -w /app \
+    "${PANEL_IMAGE}" \
+    sh -c "go build -trimpath -ldflags='-s -w' -o olcpanel ./cmd/olcpanel"
+
+  if [ ! -f "${PANEL_SOURCE_DIR}/olcpanel" ]; then
+    echo "olcpanel build did not produce ${PANEL_SOURCE_DIR}/olcpanel." >&2
+    exit 1
+  fi
+  install -m 0755 "${PANEL_SOURCE_DIR}/olcpanel" "${target}"
+}
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "This updater must run as root." >&2
   exit 1
@@ -107,7 +156,7 @@ if [ -r "${ENV_FILE}" ]; then
 fi
 
 install_system_dependencies
-install -d -m 0755 "${DATA_DIR}" "${OLCRTC_CACHE_DIR}"
+install -d -m 0755 "${DATA_DIR}" "${OLCRTC_CACHE_DIR}" "${PANEL_CACHE_DIR}"
 ensure_swap_for_olcrtc_build
 
 PANEL_PORT="${OLCPANEL_BIND##*:}"
@@ -133,8 +182,12 @@ if [ -z "${archive_url}" ]; then
   fi
 fi
 
-curl -fL "${archive_url}" -o "${tmp}/olcpanel-linux-amd64.tar.gz"
-tar -xzf "${tmp}/olcpanel-linux-amd64.tar.gz" -C "${tmp}"
+if curl -fL "${archive_url}" -o "${tmp}/olcpanel-linux-amd64.tar.gz"; then
+  tar -xzf "${tmp}/olcpanel-linux-amd64.tar.gz" -C "${tmp}"
+else
+  echo "Could not download olcpanel release archive; falling back to source build." >&2
+  build_olcpanel "${tmp}/olcpanel"
+fi
 install_olcrtc "${tmp}/olcrtc"
 
 cp -p "${INSTALL_BIN}" "${BACKUP_BIN}"
