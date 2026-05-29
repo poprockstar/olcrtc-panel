@@ -1,12 +1,11 @@
-# Docker Deployment
+# Docker
 
-Native systemd installation is the primary production path for OlcRTC Panel.
-Docker is secondary because location isolation uses Linux network namespaces,
-veth pairs, iptables, and traffic control.
+Обычная установка через `install.sh` и `systemd` предпочтительнее.
 
-If you package the binary into the Dockerfile here, run it only on Linux with
-host networking and the privileges needed by `ip netns`, `ip link`, `iptables`,
-and `tc`, for example:
+Docker-вариант нужен только тем, кто понимает ограничения сетевой изоляции
+`olcrtc`: панели нужны Linux network namespaces, `veth`, `iptables` и `tc`.
+
+Пример запуска:
 
 ```bash
 docker run --rm \
@@ -18,4 +17,4 @@ docker run --rm \
   olcpanel:local
 ```
 
-For ordinary VDS installs, prefer `install.sh` and the systemd unit.
+Для обычного VPS используйте установщик из корневого `README.md`.
