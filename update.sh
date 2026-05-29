@@ -10,7 +10,7 @@ BACKUP_OLCRTC_BIN="/usr/local/bin/olcrtc.bak"
 DATA_DIR="/var/lib/olcpanel"
 OLCRTC_SOURCE_DIR="${DATA_DIR}/olcrtc-src"
 OLCRTC_CACHE_DIR="/var/cache/olcpanel/olcrtc"
-OLCRTC_IMAGE="${OLCRTC_IMAGE:-golang:1.26-alpine3.22}"
+OLCRTC_IMAGE="${OLCRTC_IMAGE:-docker.io/library/golang:1.26-alpine3.22}"
 
 install_system_dependencies() {
   export DEBIAN_FRONTEND=noninteractive

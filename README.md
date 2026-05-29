@@ -32,6 +32,14 @@ bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/maste
 `https://github.com/openlibrecommunity/olcrtc`, соберет бинарник `olcrtc` через
 Podman и положит его в `/usr/local/bin/olcrtc`.
 
+По умолчанию для сборки используется полностью указанное имя образа
+`docker.io/library/golang:1.26-alpine3.22`, чтобы Podman не зависел от
+настроек поиска short names. При необходимости образ можно переопределить:
+
+```bash
+OLCRTC_IMAGE=docker.io/library/golang:1.26-alpine3.22 bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/install.sh)
+```
+
 Если на сервере меньше 4 ГБ RAM+swap, установщик создаст `/swapfile` на 4 ГБ,
 включит его и добавит в `/etc/fstab`. Чтобы отключить это поведение:
 

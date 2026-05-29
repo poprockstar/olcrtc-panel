@@ -12,7 +12,7 @@ BACKUP_DIR="${DATA_DIR}/backups"
 LOG_DIR="/var/log/olcpanel"
 OLCRTC_SOURCE_DIR="${DATA_DIR}/olcrtc-src"
 OLCRTC_CACHE_DIR="/var/cache/olcpanel/olcrtc"
-OLCRTC_IMAGE="${OLCRTC_IMAGE:-golang:1.26-alpine3.22}"
+OLCRTC_IMAGE="${OLCRTC_IMAGE:-docker.io/library/golang:1.26-alpine3.22}"
 
 require_root() {
   if [ "$(id -u)" -ne 0 ]; then
