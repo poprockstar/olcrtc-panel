@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -18,6 +19,7 @@ const (
 
 type Config struct {
 	BindAddress           string
+	BasePath              string
 	DatabaseURL           string
 	RuntimeDir            string
 	OlcRTCBinary          string
@@ -28,6 +30,7 @@ type Config struct {
 
 type LoadOptions struct {
 	BindAddress           string
+	BasePath              string
 	DatabaseURL           string
 	RuntimeDir            string
 	OlcRTCBinary          string
@@ -47,6 +50,17 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 	}
 	if options.BindAddress != "" {
 		bindAddress = options.BindAddress
+	}
+
+	basePath, err := NormalizeBasePath(os.Getenv("OLCPANEL_BASE_PATH"))
+	if err != nil {
+		return Config{}, err
+	}
+	if options.BasePath != "" {
+		basePath, err = NormalizeBasePath(options.BasePath)
+		if err != nil {
+			return Config{}, err
+		}
 	}
 
 	databaseURL := os.Getenv("OLCPANEL_DATABASE_URL")
@@ -102,6 +116,7 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 
 	return Config{
 		BindAddress:           bindAddress,
+		BasePath:              basePath,
 		DatabaseURL:           databaseURL,
 		RuntimeDir:            runtimeDir,
 		OlcRTCBinary:          olcrtcBinary,
@@ -109,6 +124,37 @@ func LoadWithOptions(options LoadOptions) (Config, error) {
 		TrafficSampleInterval: trafficSampleInterval,
 		LogPath:               logPath,
 	}, nil
+}
+
+func NormalizeBasePath(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" || value == "/" {
+		return "", nil
+	}
+	if strings.ContainsAny(value, " \t\r\n?#") {
+		return "", fmt.Errorf("base path must be a clean URI path without spaces, query, or fragment")
+	}
+	if !strings.HasPrefix(value, "/") {
+		value = "/" + value
+	}
+	value = strings.TrimRight(value, "/")
+	if value == "" {
+		return "", nil
+	}
+	segments := strings.Split(strings.TrimPrefix(value, "/"), "/")
+	if len(segments) == 0 || segments[0] == "" {
+		return "", fmt.Errorf("base path must contain a path segment")
+	}
+	for _, segment := range segments {
+		if segment == "" || segment == "." || segment == ".." {
+			return "", fmt.Errorf("base path must not contain empty, current, or parent segments")
+		}
+	}
+	switch segments[0] {
+	case "api", "sub", "c", "assets":
+		return "", fmt.Errorf("base path %q uses a reserved routing prefix", value)
+	}
+	return value, nil
 }
 
 func parseTrafficSampleInterval(raw string) (time.Duration, error) {

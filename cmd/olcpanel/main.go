@@ -253,6 +253,7 @@ func serve(args []string) error {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	bind := flags.String("bind", "", "HTTP bind address")
+	basePath := flags.String("base-path", "", "optional URI base path such as /panel")
 	databaseURL := flags.String("database-url", "", "database URL")
 	runtimeDir := flags.String("runtime-dir", "", "runtime directory for generated OlcRTC configs")
 	olcrtcBinary := flags.String("olcrtc-binary", "", "OlcRTC binary path or name")
@@ -268,6 +269,7 @@ func serve(args []string) error {
 
 	cfg, err := config.LoadWithOptions(config.LoadOptions{
 		BindAddress:           *bind,
+		BasePath:              *basePath,
 		DatabaseURL:           *databaseURL,
 		RuntimeDir:            *runtimeDir,
 		OlcRTCBinary:          *olcrtcBinary,
@@ -547,7 +549,7 @@ func commandUsage() string {
 	return `olcpanel manages a local OlcRTC VPS panel.
 
 Usage:
-  olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16] [--traffic-sample-interval 30s] [--log-path /var/log/olcpanel/panel.log]
+  olcpanel serve [--bind 127.0.0.1:8888] [--base-path /panel] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16] [--traffic-sample-interval 30s] [--log-path /var/log/olcpanel/panel.log]
   olcpanel migrate [--database-url sqlite:///etc/olcpanel/panel.db]
   olcpanel doctor [--database-url sqlite:///etc/olcpanel/panel.db] [--network-cidr 10.255.0.0/16]
   olcpanel backup [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--output PATH]
@@ -558,6 +560,7 @@ Usage:
 
 Environment:
   OLCPANEL_BIND           HTTP bind address. Defaults to 127.0.0.1:8888.
+  OLCPANEL_BASE_PATH      Optional URI base path. Empty or / serves from root.
   OLCPANEL_DATABASE_URL   Database URL. Defaults to sqlite:///etc/olcpanel/panel.db.
   OLCPANEL_RUNTIME_DIR    Runtime config directory. Defaults to /var/lib/olcpanel/runtime.
   OLCPANEL_OLCRTC_BINARY  OlcRTC binary path or name. Defaults to olcrtc.

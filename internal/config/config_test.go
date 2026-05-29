@@ -34,6 +34,62 @@ func TestLoadAllowsBindOverride(t *testing.T) {
 	}
 }
 
+func TestLoadNormalizesBasePath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: ""},
+		{name: "root", raw: "/", want: ""},
+		{name: "without leading slash", raw: "panel", want: "/panel"},
+		{name: "trailing slash", raw: "/panel/", want: "/panel"},
+		{name: "nested", raw: "/admin/panel/", want: "/admin/panel"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OLCPANEL_BASE_PATH", tc.raw)
+
+			cfg, err := config.Load()
+			if err != nil {
+				t.Fatalf("Load returned error: %v", err)
+			}
+
+			if cfg.BasePath != tc.want {
+				t.Fatalf("BasePath = %q, want %q", cfg.BasePath, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadAllowsBasePathCLIOverride(t *testing.T) {
+	t.Setenv("OLCPANEL_BASE_PATH", "/from-env")
+
+	cfg, err := config.LoadWithOptions(config.LoadOptions{BasePath: "from-cli/"})
+	if err != nil {
+		t.Fatalf("LoadWithOptions returned error: %v", err)
+	}
+
+	if cfg.BasePath != "/from-cli" {
+		t.Fatalf("BasePath = %q, want CLI override", cfg.BasePath)
+	}
+}
+
+func TestLoadRejectsInvalidBasePath(t *testing.T) {
+	for _, value := range []string{"/api", "/api/v1", "/sub", "/c", "/assets", "/bad path", "/bad?x=1", "/bad#top", "/../admin", "/admin/../panel"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("OLCPANEL_BASE_PATH", value)
+
+			_, err := config.Load()
+			if err == nil {
+				t.Fatal("Load returned nil error, want invalid base path error")
+			}
+			if !strings.Contains(err.Error(), "base path") {
+				t.Fatalf("error = %q, want base path context", err.Error())
+			}
+		})
+	}
+}
+
 func TestLoadUsesDefaultDatabaseURL(t *testing.T) {
 	t.Setenv("OLCPANEL_DATABASE_URL", "")
 
