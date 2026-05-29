@@ -10,6 +10,34 @@ The v1 target is a single Linux server:
 - systemd as the primary production runtime;
 - Docker as a secondary, documented option because netns/veth/tc needs elevated Linux capabilities.
 
+## Public Install And Update
+
+Install on a Debian/Ubuntu amd64 VDS as root:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/install.sh)
+```
+
+The installer prompts for a public panel port and an optional URI path. It writes
+`/etc/default/olcpanel`, installs the systemd unit, runs migrations, enables the
+service, and prints the reachable URL, for example:
+
+```text
+http://203.0.113.10:8888/
+http://203.0.113.10:8888/panel/
+```
+
+Update an existing install while preserving `/etc/default/olcpanel`, the
+database, runtime configs, logs, and backups:
+
+```bash
+bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/update.sh)
+```
+
+The app defaults remain local for development and manual runs:
+`OLCPANEL_BIND=127.0.0.1:8888` and no base path. Public installer deployments
+use `OLCPANEL_BIND=0.0.0.0:PORT` and may set `OLCPANEL_BASE_PATH=/panel`.
+
 ## Development
 
 Build the frontend:
@@ -44,6 +72,12 @@ Run locally:
 
 ```bash
 ./bin/olcpanel serve
+```
+
+Run locally under a URI prefix:
+
+```bash
+./bin/olcpanel serve --base-path /panel
 ```
 
 Run locally with an explicit SQLite database:
@@ -114,6 +148,11 @@ Check state:
 ```bash
 curl http://127.0.0.1:8888/api/v1/state
 ```
+
+When `OLCPANEL_BASE_PATH=/panel`, API, UI, subscription, and public client
+routes are served below that prefix, for example
+`http://127.0.0.1:8888/panel/api/v1/state` and
+`http://127.0.0.1:8888/panel/sub/sub_example_private_token`.
 
 Create the first admin account. This endpoint only works while
 `setup_required` is `true`:

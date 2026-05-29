@@ -1,0 +1,16 @@
+services:
+  olcpanel:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    network_mode: host
+    privileged: true
+    environment:
+      OLCPANEL_BIND: 0.0.0.0:8888
+      OLCPANEL_DATABASE_URL: sqlite:///etc/olcpanel/panel.db
+      OLCPANEL_RUNTIME_DIR: /var/lib/olcpanel/runtime
+      OLCPANEL_LOG_PATH: /var/log/olcpanel/panel.log
+    volumes:
+      - /etc/olcpanel:/etc/olcpanel
+      - /var/lib/olcpanel:/var/lib/olcpanel
+      - /var/log/olcpanel:/var/log/olcpanel

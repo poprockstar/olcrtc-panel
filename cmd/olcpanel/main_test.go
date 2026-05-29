@@ -20,12 +20,22 @@ func TestServeRejectsUnexpectedArgument(t *testing.T) {
 	}
 }
 
-func TestUsageIncludesDoctorNetworkCIDRAndTrafficSampleIntervalAndLogPath(t *testing.T) {
+func TestUsageIncludesDoctorNetworkCIDRAndTrafficSampleIntervalLogPathAndBasePath(t *testing.T) {
 	usage := commandUsage()
-	for _, want := range []string{"olcpanel doctor", "--network-cidr", "OLCPANEL_NETWORK_CIDR", "--traffic-sample-interval", "OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", "--log-path", "OLCPANEL_LOG_PATH"} {
+	for _, want := range []string{"olcpanel doctor", "--network-cidr", "OLCPANEL_NETWORK_CIDR", "--traffic-sample-interval", "OLCPANEL_TRAFFIC_SAMPLE_INTERVAL", "--log-path", "OLCPANEL_LOG_PATH", "--base-path", "OLCPANEL_BASE_PATH"} {
 		if !strings.Contains(usage, want) {
 			t.Fatalf("usage does not contain %q:\n%s", want, usage)
 		}
+	}
+}
+
+func TestServeRejectsInvalidBasePath(t *testing.T) {
+	err := run([]string{"serve", "--base-path", "/api"})
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !strings.Contains(err.Error(), "base path") {
+		t.Fatalf("expected base path error, got %q", err.Error())
 	}
 }
 

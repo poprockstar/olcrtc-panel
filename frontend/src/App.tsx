@@ -21,7 +21,7 @@ import {
   XCircle
 } from "lucide-react";
 import QRCode from "qrcode";
-import { api, ApiError } from "./api";
+import { api, ApiError, panelUrl } from "./api";
 import {
   asNumberOrNull,
   formatBytes,
@@ -490,8 +490,8 @@ function LocationForm({ clientId, csrfToken }: { clientId: string; csrfToken: st
 }
 
 function SubscriptionPanel({ client, settings }: { client: Client; settings?: Settings }) {
-  const subscriptionUrl = `${window.location.origin}/sub/${client.subscription_token}`;
-  const publicUrl = `${window.location.origin}/c/${client.id}`;
+  const subscriptionUrl = panelUrl(`/sub/${client.subscription_token}`);
+  const publicUrl = panelUrl(`/c/${client.id}`);
   const [plainText, setPlainText] = useState("");
   const [selectedUri, setSelectedUri] = useState("");
   const subscription = useMutation({

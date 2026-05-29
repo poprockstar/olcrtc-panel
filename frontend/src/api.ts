@@ -19,6 +19,14 @@ type RequestOptions = {
   text?: boolean;
 };
 
+declare global {
+  interface Window {
+    __OLCPANEL_BASE_PATH__?: string;
+  }
+}
+
+let runtimeBasePath = normalizeBasePath(typeof window === "undefined" ? "" : window.__OLCPANEL_BASE_PATH__ ?? "");
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -37,7 +45,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     headers["X-CSRF-Token"] = options.csrfToken;
   }
 
-  const response = await fetch(path, {
+  const response = await fetch(pathWithBase(path), {
     method: options.method ?? "GET",
     credentials: "same-origin",
     headers,
@@ -57,6 +65,27 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   return (await response.json()) as T;
 }
 
+function pathWithBase(path: string): string {
+  return `${runtimeBasePath}${path}`;
+}
+
+function normalizeBasePath(raw: string | undefined): string {
+  const value = (raw ?? "").trim();
+  if (!value || value === "/" || value === "%OLCPANEL_BASE_PATH%") {
+    return "";
+  }
+  const withSlash = value.startsWith("/") ? value : `/${value}`;
+  return withSlash.replace(/\/+$/, "");
+}
+
+export function setRuntimeBasePath(basePath: string | undefined) {
+  runtimeBasePath = normalizeBasePath(basePath);
+}
+
+export function panelUrl(path: string): string {
+  return `${window.location.origin}${pathWithBase(path)}`;
+}
+
 async function readError(response: Response): Promise<string> {
   const text = await response.text();
   if (!text) {
@@ -71,7 +100,11 @@ async function readError(response: Response): Promise<string> {
 }
 
 export const api = {
-  state: () => request<StateResponse>("/api/v1/state"),
+  state: async () => {
+    const state = await request<StateResponse>("/api/v1/state");
+    setRuntimeBasePath(state.base_path);
+    return state;
+  },
   setup: (payload: { username: string; password: string }) =>
     request<SessionResponse>("/api/v1/setup", { method: "POST", body: payload }),
   login: (payload: { username: string; password: string }) =>

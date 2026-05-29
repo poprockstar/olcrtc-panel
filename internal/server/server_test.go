@@ -46,6 +46,7 @@ func TestStateEndpointReturnsFirstRunState(t *testing.T) {
 		APIVersion    string `json:"api_version"`
 		SetupRequired bool   `json:"setup_required"`
 		BindAddress   string `json:"bind_address"`
+		BasePath      string `json:"base_path"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("response is not JSON: %v", err)
@@ -62,6 +63,89 @@ func TestStateEndpointReturnsFirstRunState(t *testing.T) {
 	}
 	if body.BindAddress != "127.0.0.1:8888" {
 		t.Fatalf("BindAddress = %q, want default bind", body.BindAddress)
+	}
+	if body.BasePath != "" {
+		t.Fatalf("BasePath = %q, want empty root base path", body.BasePath)
+	}
+}
+
+func TestBasePathRoutesAPIStaticAndCookies(t *testing.T) {
+	db := testDB(t)
+	assets := fstest.MapFS{
+		"index.html":        &fstest.MapFile{Data: []byte(`<!doctype html><script>window.__OLCPANEL_BASE_PATH__="%OLCPANEL_BASE_PATH%";</script><title>OlcRTC Panel</title>`)},
+		"assets/index.css":  &fstest.MapFile{Data: []byte("body{color:#111}")},
+		"assets/app.js":     &fstest.MapFile{Data: []byte("console.log('ok')")},
+		"assets/other.txt":  &fstest.MapFile{Data: []byte("asset")},
+		"nested/ignored.js": &fstest.MapFile{Data: []byte("ignored")},
+	}
+	handler := server.New(config.Config{BindAddress: "0.0.0.0:9999", BasePath: "/panel"}, assets, server.WithDatabase(db))
+
+	unprefixedAPI := httptest.NewRecorder()
+	handler.ServeHTTP(unprefixedAPI, httptest.NewRequest(http.MethodGet, "/api/v1/state", nil))
+	if unprefixedAPI.Code != http.StatusNotFound {
+		t.Fatalf("unprefixed API status = %d, want %d", unprefixedAPI.Code, http.StatusNotFound)
+	}
+
+	prefixedState := httptest.NewRecorder()
+	handler.ServeHTTP(prefixedState, httptest.NewRequest(http.MethodGet, "/panel/api/v1/state", nil))
+	if prefixedState.Code != http.StatusOK {
+		t.Fatalf("prefixed state status = %d, want %d, body: %s", prefixedState.Code, http.StatusOK, prefixedState.Body.String())
+	}
+	var state struct {
+		BasePath string `json:"base_path"`
+	}
+	if err := json.Unmarshal(prefixedState.Body.Bytes(), &state); err != nil {
+		t.Fatalf("state response is not JSON: %v", err)
+	}
+	if state.BasePath != "/panel" {
+		t.Fatalf("base_path = %q, want /panel", state.BasePath)
+	}
+
+	noSlash := httptest.NewRecorder()
+	handler.ServeHTTP(noSlash, httptest.NewRequest(http.MethodGet, "/panel", nil))
+	if noSlash.Code != http.StatusPermanentRedirect {
+		t.Fatalf("/panel status = %d, want %d", noSlash.Code, http.StatusPermanentRedirect)
+	}
+	if got := noSlash.Header().Get("Location"); got != "/panel/" {
+		t.Fatalf("/panel redirect Location = %q, want /panel/", got)
+	}
+
+	root := httptest.NewRecorder()
+	handler.ServeHTTP(root, httptest.NewRequest(http.MethodGet, "/", nil))
+	if root.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("root status = %d, want %d", root.Code, http.StatusTemporaryRedirect)
+	}
+	if got := root.Header().Get("Location"); got != "/panel/" {
+		t.Fatalf("root redirect Location = %q, want /panel/", got)
+	}
+
+	index := httptest.NewRecorder()
+	handler.ServeHTTP(index, httptest.NewRequest(http.MethodGet, "/panel/", nil))
+	if index.Code != http.StatusOK {
+		t.Fatalf("index status = %d, want %d", index.Code, http.StatusOK)
+	}
+	if !strings.Contains(index.Body.String(), `window.__OLCPANEL_BASE_PATH__="/panel"`) {
+		t.Fatalf("index body = %q, want injected base path", index.Body.String())
+	}
+
+	asset := httptest.NewRecorder()
+	handler.ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/panel/assets/index.css", nil))
+	if asset.Code != http.StatusOK || !strings.Contains(asset.Body.String(), "color") {
+		t.Fatalf("asset response status=%d body=%q, want CSS asset", asset.Code, asset.Body.String())
+	}
+
+	setup := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/panel/api/v1/setup", bytes.NewBufferString(`{"username":"admin","password":"correct horse battery"}`))
+	handler.ServeHTTP(setup, req)
+	if setup.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, want %d, body: %s", setup.Code, http.StatusOK, setup.Body.String())
+	}
+	cookies := setup.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("setup did not set a session cookie")
+	}
+	if cookies[0].Path != "/panel" {
+		t.Fatalf("session cookie Path = %q, want /panel", cookies[0].Path)
 	}
 }
 

@@ -13,7 +13,7 @@ Last updated: 2026-05-29
 
 ## Phase State
 
-- Current phase: Phase 12 - Backup, Restore, Import, Export complete; Phase 13 - Installer, Updater, Systemd, Docker is next.
+- Current phase: Phase 13 - Installer, Updater, Systemd, Docker complete; Phase 14 - Hardening And Release Candidate is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -28,7 +28,8 @@ Last updated: 2026-05-29
   - Phase 10 - Logs, Metrics, And Runtime Status API
   - Phase 11 - Frontend Operational UI
   - Phase 12 - Backup, Restore, Import, Export
-- Next session target: start Phase 13 installer, updater, systemd, and deployment packaging.
+  - Phase 13 - Installer, Updater, Systemd, Docker
+- Next session target: start Phase 14 hardening and release-candidate validation.
 
 ## Implemented Capabilities
 
@@ -170,6 +171,18 @@ Last updated: 2026-05-29
   - `olcpanel reset-admin --username USER --password PASS [--database-url]`
 - Frontend Backups view now lists real backup records, shows the configured backup path, creates backups, restores selected completed backups with confirmation, exports Panel JSON, and imports Panel JSON with success/error state.
 - Embedded frontend assets in `internal/webui/dist/` were rebuilt after the Phase 12 UI build.
+- Runtime base path configuration added with `OLCPANEL_BASE_PATH` and `olcpanel serve --base-path`; empty or `/` serves from root, while `/panel` serves the full app below `/panel/`.
+- Base path validation normalizes leading/trailing slashes and rejects spaces, query strings, fragments, parent/current path segments, and reserved first segments that collide with `/api`, `/sub`, `/c`, or `/assets`.
+- `GET /api/v1/state` now includes `base_path`.
+- Server routing now supports prefixed UI, API, subscription, public client, and asset paths; `/panel` redirects to `/panel/`, root redirects to the configured panel path, and unprefixed app routes are unavailable when a base path is configured.
+- Browser session cookies now use the configured base path as their `Path` when the panel is served below a URI prefix.
+- Frontend Vite output now uses relative assets, receives the runtime base path from the injected HTML bootstrap and state response, prefixes API/subscription fetches, and generates `/sub/{token}` and `/c/{id}` URLs under the configured base path.
+- `install.sh` added for one-line Debian/Ubuntu amd64 installs. It prompts for public port and optional URI path, writes `/etc/default/olcpanel`, installs the Linux release binary or a supplied binary/download URL, installs systemd, runs migrations, enables the service, and prints the final public URL.
+- `update.sh` added for release updates. It preserves `/etc/default/olcpanel`, database, runtime configs, logs, and backups, installs the selected release, runs migrations, restarts the service, health-checks the configured base path, and rolls back the previous binary on failure.
+- `deploy/olcpanel.service` added with `/etc/default/olcpanel` environment loading, migration before serve, and `SIGHUP` reload wiring.
+- GitHub Actions release workflow added for `v*` tags to build `olcpanel-linux-amd64.tar.gz` and a SHA256 checksum.
+- Docker packaging remains secondary with documented host-network/privileged requirements and a Compose example.
+- Reverse-proxy notes added for Caddy and Nginx TLS termination while keeping `OLCPANEL_BASE_PATH` aligned with the public URI prefix.
 
 ## Phase 0 Architecture Review Notes
 
@@ -414,6 +427,13 @@ Last updated: 2026-05-29
   - `npm --prefix frontend run build` passed and rebuilt embedded assets.
   - `go build -o bin\olcpanel ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 ./cmd/olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
+- Phase 13:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run test` passed with 13 Vitest/Testing Library tests.
+  - `npm --prefix frontend run build` passed and rebuilt embedded assets.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
+  - `bash -n install.sh` and `bash -n update.sh` could not run because this Windows environment routes `bash` through a missing WSL binary.
 
 ## Open Risks And Blockers
 
@@ -425,6 +445,7 @@ Last updated: 2026-05-29
 - Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
 - Current verification ran from Windows, but production netns/veth/tc behavior must be verified in an isolated Linux environment with `go test -tags root_e2e ./internal/netstack`.
+- One-line install/update scripts have static and build coverage from Windows, but a clean Debian/Ubuntu root install and update rollback drill remain required before a public release announcement.
 - `olcpanel doctor` detects stale OlcPanel namespaces/veths and required command/sysctl state, but deeper NAT/tc drift reporting may need additional hardening during Linux deployment validation.
 - Traffic accounting depends on Linux sysfs veth statistics at runtime; Windows verification covers the reader with a temporary sysfs-shaped fixture, not real kernel counters.
 - Host metrics are snapshot-only and intentionally not retained historically; long-term charts or Prometheus-style scraping remain future work.

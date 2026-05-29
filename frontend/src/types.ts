@@ -5,6 +5,7 @@ export type StateResponse = {
   api_version: string;
   setup_required: boolean;
   bind_address: string;
+  base_path: string;
   authenticated?: boolean;
 };
 

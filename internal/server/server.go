@@ -32,6 +32,7 @@ type StateResponse struct {
 	APIVersion    string `json:"api_version"`
 	SetupRequired bool   `json:"setup_required"`
 	BindAddress   string `json:"bind_address"`
+	BasePath      string `json:"base_path"`
 	Authenticated bool   `json:"authenticated,omitempty"`
 }
 
@@ -47,6 +48,7 @@ type dependencies struct {
 	setupLimiter      *auth.RateLimiter
 	loginLimiter      *auth.RateLimiter
 	apiKeyFailLimiter *auth.RateLimiter
+	basePath          string
 }
 
 type reloader interface {
@@ -90,24 +92,44 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 		setupLimiter:      auth.NewRateLimiter(5, time.Minute),
 		loginLimiter:      auth.NewRateLimiter(5, time.Minute),
 		apiKeyFailLimiter: auth.NewRateLimiter(10, time.Minute),
+		basePath:          cfg.BasePath,
 	}
 	for _, option := range options {
 		option(&deps)
 	}
 
-	mux := http.NewServeMux()
-	registerStateRoutes(mux, cfg, deps)
-	registerAuthRoutes(mux, deps)
-	registerSettingsRoutes(mux, deps)
-	registerReloadRoutes(mux, deps)
-	registerClientRoutes(mux, deps)
-	registerSubscriptionRoutes(mux, deps)
-	registerAPIKeyRoutes(mux, deps)
-	registerObservabilityRoutes(mux, deps)
-	registerBackupRoutes(mux, cfg, deps)
-	registerStaticRoutes(mux, assets)
+	appMux := http.NewServeMux()
+	registerStateRoutes(appMux, cfg, deps)
+	registerAuthRoutes(appMux, deps)
+	registerSettingsRoutes(appMux, deps)
+	registerReloadRoutes(appMux, deps)
+	registerClientRoutes(appMux, deps)
+	registerSubscriptionRoutes(appMux, deps)
+	registerAPIKeyRoutes(appMux, deps)
+	registerObservabilityRoutes(appMux, deps)
+	registerBackupRoutes(appMux, cfg, deps)
+	registerStaticRoutes(appMux, cfg, assets)
 
-	return mux
+	return withBasePath(cfg.BasePath, appMux)
+}
+
+func withBasePath(basePath string, handler http.Handler) http.Handler {
+	if basePath == "" {
+		return handler
+	}
+	stripped := http.StripPrefix(basePath, handler)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == basePath:
+			http.Redirect(w, r, basePath+"/", http.StatusPermanentRedirect)
+		case r.URL.Path == "/":
+			http.Redirect(w, r, basePath+"/", http.StatusTemporaryRedirect)
+		case strings.HasPrefix(r.URL.Path, basePath+"/"):
+			stripped.ServeHTTP(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	})
 }
 
 type restoreRuntime interface {
@@ -238,6 +260,7 @@ func registerStateRoutes(mux *http.ServeMux, cfg config.Config, deps dependencie
 			APIVersion:    "v1",
 			SetupRequired: setupRequired,
 			BindAddress:   cfg.BindAddress,
+			BasePath:      cfg.BasePath,
 			Authenticated: authenticated,
 		})
 	})
@@ -275,7 +298,7 @@ func registerAuthRoutes(mux *http.ServeMux, deps dependencies) {
 			http.Error(w, "failed to create session", http.StatusInternalServerError)
 			return
 		}
-		setSessionCookie(w, r, session.ID, session.ExpiresAt)
+		setSessionCookie(w, r, deps.cookiePath(), session.ID, session.ExpiresAt)
 		writeJSON(w, sessionResponse{Username: user.Username, CSRFToken: session.CSRFToken})
 	})
 
@@ -315,7 +338,7 @@ func registerAuthRoutes(mux *http.ServeMux, deps dependencies) {
 			http.Error(w, "failed to create session", http.StatusInternalServerError)
 			return
 		}
-		setSessionCookie(w, r, session.ID, session.ExpiresAt)
+		setSessionCookie(w, r, deps.cookiePath(), session.ID, session.ExpiresAt)
 		writeJSON(w, sessionResponse{Username: user.Username, CSRFToken: session.CSRFToken})
 	})
 
@@ -328,7 +351,7 @@ func registerAuthRoutes(mux *http.ServeMux, deps dependencies) {
 			http.Error(w, "failed to revoke session", http.StatusInternalServerError)
 			return
 		}
-		clearSessionCookie(w, r)
+		clearSessionCookie(w, r, deps.cookiePath())
 		w.WriteHeader(http.StatusNoContent)
 	})
 }
@@ -743,7 +766,7 @@ func registerObservabilityRoutes(mux *http.ServeMux, deps dependencies) {
 	})
 }
 
-func registerStaticRoutes(mux *http.ServeMux, assets fs.FS) {
+func registerStaticRoutes(mux *http.ServeMux, cfg config.Config, assets fs.FS) {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			http.NotFound(w, r)
@@ -756,6 +779,10 @@ func registerStaticRoutes(mux *http.ServeMux, assets fs.FS) {
 		}
 
 		if data, err := fs.ReadFile(assets, path); err == nil {
+			if path == "index.html" {
+				serveIndex(w, r, cfg, data)
+				return
+			}
 			http.ServeContent(w, r, path, time.Time{}, bytes.NewReader(data))
 			return
 		}
@@ -765,9 +792,14 @@ func registerStaticRoutes(mux *http.ServeMux, assets fs.FS) {
 			http.Error(w, "embedded UI is unavailable", http.StatusInternalServerError)
 			return
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
+		serveIndex(w, r, cfg, data)
 	})
+}
+
+func serveIndex(w http.ResponseWriter, r *http.Request, cfg config.Config, data []byte) {
+	data = bytes.ReplaceAll(data, []byte("%OLCPANEL_BASE_PATH%"), []byte(cfg.BasePath))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	http.ServeContent(w, r, "index.html", time.Time{}, bytes.NewReader(data))
 }
 
 func parseLogQuery(r *http.Request) (observability.LogQuery, error) {
@@ -1035,11 +1067,18 @@ func sameOrigin(r *http.Request) bool {
 	return origin == scheme+"://"+r.Host
 }
 
-func setSessionCookie(w http.ResponseWriter, r *http.Request, value string, expires time.Time) {
+func (deps dependencies) cookiePath() string {
+	if deps.basePath == "" {
+		return "/"
+	}
+	return deps.basePath
+}
+
+func setSessionCookie(w http.ResponseWriter, r *http.Request, path string, value string, expires time.Time) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    value,
-		Path:     "/",
+		Path:     path,
 		Expires:  expires,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -1047,11 +1086,11 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, value string, expi
 	})
 }
 
-func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func clearSessionCookie(w http.ResponseWriter, r *http.Request, path string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     auth.SessionCookieName,
 		Value:    "",
-		Path:     "/",
+		Path:     path,
 		Expires:  time.Unix(0, 0),
 		MaxAge:   -1,
 		HttpOnly: true,
