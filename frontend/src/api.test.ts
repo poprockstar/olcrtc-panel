@@ -56,3 +56,40 @@ describe("API base path", () => {
     expect(panelUrl("/c/cl_1")).toBe(`${window.location.origin}/panel/c/cl_1`);
   });
 });
+
+describe("API keys", () => {
+  test("lists, creates, and revokes API keys with CSRF where required", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/v1/api-keys" && (init?.method ?? "GET") === "GET") {
+        return new Response(JSON.stringify([{ id: 1, name: "deploy", created_at: "2026-05-29T00:00:00Z" }]));
+      }
+      if (url === "/api/v1/api-keys" && init?.method === "POST") {
+        return new Response(JSON.stringify({ id: 2, name: "automation", token: "olcp_api_secret" }));
+      }
+      if (url === "/api/v1/api-keys/2" && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
+      return new Response("unexpected", { status: 500 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(api.apiKeys()).resolves.toEqual([{ id: 1, name: "deploy", created_at: "2026-05-29T00:00:00Z" }]);
+    await expect(api.createApiKey("automation", "csrf-token")).resolves.toMatchObject({ token: "olcp_api_secret" });
+    await expect(api.revokeApiKey(2, "csrf-token")).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/v1/api-keys", expect.objectContaining({ method: "GET" }));
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/api-keys",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({ "X-CSRF-Token": "csrf-token" }),
+        body: JSON.stringify({ name: "automation" })
+      })
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/api-keys/2",
+      expect.objectContaining({ method: "DELETE", headers: expect.objectContaining({ "X-CSRF-Token": "csrf-token" }) })
+    );
+  });
+});

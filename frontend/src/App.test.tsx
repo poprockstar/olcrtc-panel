@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { App } from "./App";
@@ -80,7 +80,7 @@ describe("App routing", () => {
       { url: "/api/v1/metrics", body: metricsFixture() }
     ]);
 
-    expect(await screen.findByRole("heading", { name: /dashboard/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /overview/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /reload/i })).toBeInTheDocument();
   });
 });
@@ -108,6 +108,30 @@ describe("browser mutations", () => {
 });
 
 describe("clients and locations", () => {
+  test("renders the cockpit navigation and selected client workspace", async () => {
+    const user = userEvent.setup();
+    renderAuthenticated([
+      { url: "/api/v1/metrics", body: metricsFixture({ processes: { running: 1, stopped: 0, failed: 0, pending: 0 } }) },
+      { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Alpha" }), clientFixture({ id: "cl_2", name: "Beta", enabled: false })] },
+      { url: "/api/v1/clients/cl_1/locations", body: [locationFixture({ client_id: "cl_1", name: "Moscow", runtime_status: "running" })] },
+      { url: "/api/v1/clients/cl_2/locations", body: [] }
+    ]);
+
+    expect(await screen.findByRole("button", { name: /overview/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /runtime \/ logs/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /security \/ api keys/i })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /clients/i }));
+    expect(await screen.findByRole("searchbox", { name: /search clients/i })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Alpha" })).toBeInTheDocument();
+    expect(await screen.findByText("Moscow")).toBeInTheDocument();
+
+    await user.type(screen.getByRole("searchbox", { name: /search clients/i }), "bet");
+    await user.click(screen.getByRole("button", { name: /select client beta/i }));
+    expect(await screen.findByRole("heading", { name: "Beta" })).toBeInTheDocument();
+    expect(screen.getByText(/no locations yet/i)).toBeInTheDocument();
+  });
+
   test("creates clients with validated form payloads and shows API errors", async () => {
     const user = userEvent.setup();
     const { calls } = renderAuthenticated([
@@ -119,16 +143,103 @@ describe("clients and locations", () => {
     ]);
 
     await user.click(await screen.findByRole("button", { name: /clients/i }));
-    await user.click(screen.getByRole("button", { name: /save client/i }));
+    await user.click(screen.getByRole("button", { name: /new client/i }));
+    await user.click(screen.getByRole("button", { name: /create client/i }));
     expect(await screen.findByText(/client name is required/i)).toBeInTheDocument();
     await user.type(screen.getByLabelText(/client name/i), "Acme");
     await user.clear(screen.getByLabelText(/quota bytes/i));
     await user.type(screen.getByLabelText(/quota bytes/i), "1073741824");
-    await user.click(screen.getByRole("button", { name: /save client/i }));
+    await user.click(screen.getByRole("button", { name: /create client/i }));
 
     expect(await screen.findAllByText("Acme")).toHaveLength(2);
     const create = calls.filter((call) => call.url === "/api/v1/clients" && call.init?.method === "POST").at(-1);
     expect(JSON.parse(String(create?.init?.body))).toMatchObject({ name: "Acme", enabled: true, quota_bytes: 1073741824 });
+  });
+
+  test("edits and deletes clients through drawers and confirmation modals", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderAuthenticated([
+      { url: "/api/v1/metrics", body: metricsFixture() },
+      { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Client" })] },
+      { url: "/api/v1/clients/cl_1/locations", body: [] },
+      { url: "/api/v1/clients/cl_1", method: "PUT", body: clientFixture({ id: "cl_1", name: "Renamed" }) },
+      { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Renamed" })] },
+      { url: "/api/v1/clients/cl_1", method: "DELETE", status: 204, body: "" },
+      { url: "/api/v1/clients", body: [] }
+    ]);
+
+    await user.click(await screen.findByRole("button", { name: /clients/i }));
+    await user.click(await screen.findByRole("button", { name: /edit client/i }));
+    await user.clear(screen.getByLabelText(/client name/i));
+    await user.type(screen.getByLabelText(/client name/i), "Renamed");
+    await user.click(screen.getByRole("button", { name: /save client/i }));
+    expect(await screen.findByRole("heading", { name: "Renamed" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /delete client/i }));
+    expect(await screen.findByRole("dialog", { name: /delete client/i })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^delete$/i }));
+
+    expect(calls.some((call) => call.url === "/api/v1/clients/cl_1" && call.init?.method === "PUT")).toBe(true);
+    expect(calls.some((call) => call.url === "/api/v1/clients/cl_1" && call.init?.method === "DELETE")).toBe(true);
+  });
+
+  test("creates video transport locations from preset fields and validates advanced JSON", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderAuthenticated([
+      { url: "/api/v1/metrics", body: metricsFixture() },
+      { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Client" })] },
+      { url: "/api/v1/clients/cl_1/locations", body: [] },
+      { url: "/api/v1/clients/cl_1/locations", method: "POST", body: locationFixture({ name: "Video edge", transport: "videochannel" }) },
+      { url: "/api/v1/clients/cl_1/locations", body: [locationFixture({ name: "Video edge", transport: "videochannel" })] },
+      { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Client", locations_count: 1 })] }
+    ]);
+
+    await user.click(await screen.findByRole("button", { name: /clients/i }));
+    await user.click(await screen.findByRole("button", { name: /add location/i }));
+    await user.type(screen.getByLabelText(/location name/i), "Video edge");
+    await user.selectOptions(screen.getByLabelText(/provider/i), "wbstream");
+    await user.selectOptions(screen.getByLabelText(/transport/i), "videochannel");
+    await user.clear(screen.getByLabelText(/width/i));
+    await user.type(screen.getByLabelText(/width/i), "1280");
+    await user.clear(screen.getByLabelText(/height/i));
+    await user.type(screen.getByLabelText(/height/i), "720");
+    await user.selectOptions(screen.getByLabelText(/codec/i), "tile");
+    await user.click(screen.getByLabelText(/advanced json/i));
+    fireEvent.change(screen.getByLabelText(/transport payload json/i), { target: { value: "{bad" } });
+    await user.click(screen.getByRole("button", { name: /save location/i }));
+    expect(await screen.findByText(/must be valid json/i)).toBeInTheDocument();
+
+    await user.clear(screen.getByLabelText(/transport payload json/i));
+    await user.click(screen.getByLabelText(/advanced json/i));
+    await user.click(screen.getByRole("button", { name: /save location/i }));
+
+    const create = calls.find((call) => call.url === "/api/v1/clients/cl_1/locations" && call.init?.method === "POST");
+    expect(JSON.parse(String(create?.init?.body))).toMatchObject({
+      name: "Video edge",
+      transport: "videochannel",
+      transport_payload: expect.objectContaining({ codec: "tile", width: 1280, height: 720 })
+    });
+  });
+
+  test("rotates subscription token, crypto keys, and rooms behind confirmation", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderAuthenticated([
+      { url: "/api/v1/metrics", body: metricsFixture() },
+      { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Client" })] },
+      { url: "/api/v1/clients/cl_1/locations", body: [locationFixture({ id: "loc_1" })] },
+      { url: "/api/v1/clients/cl_1/rotate", method: "POST", body: [locationFixture({ id: "loc_1", room_id: "new-room" })] },
+      { url: "/api/v1/clients/cl_1/locations", body: [locationFixture({ id: "loc_1", room_id: "new-room" })] },
+      { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Client", subscription_token: "new-sub" })] }
+    ]);
+
+    await user.click(await screen.findByRole("button", { name: /clients/i }));
+    await user.click(await screen.findByRole("button", { name: /rotate credentials/i }));
+    await user.click(screen.getByLabelText(/subscription token/i));
+    await user.click(screen.getByLabelText(/rooms/i));
+    await user.click(screen.getByRole("button", { name: /rotate now/i }));
+
+    const rotate = calls.find((call) => call.url === "/api/v1/clients/cl_1/rotate" && call.init?.method === "POST");
+    expect(JSON.parse(String(rotate?.init?.body))).toEqual({ rotate_subscription_token: true, rotate_rooms: true });
   });
 
   test("prevents unsupported provider and transport combinations", async () => {
@@ -140,7 +251,7 @@ describe("clients and locations", () => {
     ]);
 
     await user.click(await screen.findByRole("button", { name: /clients/i }));
-    await user.click(await screen.findByRole("button", { name: /manage client client/i }));
+    await user.click(await screen.findByRole("button", { name: /add location/i }));
     await user.selectOptions(screen.getByLabelText(/provider/i), "telemost");
     await user.selectOptions(screen.getAllByLabelText(/transport/i)[0], "datachannel");
     await user.type(screen.getByLabelText(/location name/i), "Bad");
@@ -181,7 +292,7 @@ describe("settings and subscriptions", () => {
     renderAuthenticated([
       { url: "/api/v1/metrics", body: metricsFixture() },
       { url: "/api/v1/clients", body: [clientFixture({ id: "cl_1", name: "Client", subscription_token: "sub_secret" })] },
-      { url: "/api/v1/clients/cl_1/locations", body: [] },
+      { url: "/api/v1/clients/cl_1/locations", body: [locationFixture({ client_id: "cl_1", name: "Main" })] },
       {
         url: "/sub/sub_secret",
         headers: { "content-type": "text/plain; charset=utf-8" },
@@ -190,7 +301,6 @@ describe("settings and subscriptions", () => {
     ]);
 
     await user.click(await screen.findByRole("button", { name: /clients/i }));
-    await user.click(await screen.findByRole("button", { name: /manage client client/i }));
     await user.click(screen.getByRole("button", { name: /load subscription/i }));
 
     expect(await screen.findByText("olcrtc://wbstream?datachannel@room#key$Client / Main")).toBeInTheDocument();
@@ -268,7 +378,7 @@ function clientFixture(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function metricsFixture() {
+function metricsFixture(overrides: Record<string, unknown> = {}) {
   return {
     generated_at: "2026-05-28T00:00:00Z",
     panel: { uptime_seconds: 120 },
@@ -278,7 +388,29 @@ function metricsFixture() {
     processes: { running: 0, stopped: 0, failed: 0, pending: 0 },
     traffic: { total_bytes: 0, rx_bytes: 0, tx_bytes: 0 },
     quotas: { warning: 0, exceeded: 0 },
-    per_client: []
+    per_client: [],
+    ...overrides
+  };
+}
+
+function locationFixture(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "loc_1",
+    client_id: "cl_1",
+    name: "Main",
+    enabled: true,
+    provider: "wbstream",
+    transport: "datachannel",
+    transport_stability: "stable",
+    room_id: "room-one",
+    crypto_key: "crypto-one",
+    transport_payload: {},
+    dns: "8.8.8.8:53",
+    speed_limit_bps: null,
+    runtime_status: "stopped",
+    created_at: "2026-05-28T00:00:00Z",
+    updated_at: "2026-05-28T00:00:00Z",
+    ...overrides
   };
 }
 

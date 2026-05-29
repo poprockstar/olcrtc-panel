@@ -9,6 +9,24 @@ export type StateResponse = {
   authenticated?: boolean;
 };
 
+export type ReloadAction = {
+  location_id: string;
+  client_id: string;
+  action: "started" | "restarted" | "stopped" | "unchanged" | "skipped" | string;
+  reason: string;
+};
+
+export type ReloadResult = {
+  summary: {
+    started: number;
+    restarted: number;
+    stopped: number;
+    unchanged: number;
+    skipped: number;
+  };
+  actions: ReloadAction[];
+};
+
 export type SessionResponse = {
   username: string;
   csrf_token: string;
@@ -137,4 +155,18 @@ export type ImportResult = {
   clients_created: number;
   locations_created: number;
   settings_applied: boolean;
+};
+
+export type APIKey = {
+  id: number;
+  name: string;
+  created_at: string;
+  last_used_at?: string | null;
+  revoked_at?: string | null;
+};
+
+export type APIKeyCreateResponse = {
+  id: number;
+  name: string;
+  token: string;
 };

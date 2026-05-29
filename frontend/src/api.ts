@@ -1,4 +1,6 @@
 import type {
+  APIKey,
+  APIKeyCreateResponse,
   Client,
   ClientInput,
   BackupRecord,
@@ -7,6 +9,7 @@ import type {
   LocationInput,
   LogResponse,
   MetricsSnapshot,
+  ReloadResult,
   SessionResponse,
   Settings,
   StateResponse
@@ -114,7 +117,7 @@ export const api = {
   saveSettings: (settings: Settings, csrfToken: string) =>
     request<Settings>("/api/v1/settings", { method: "PUT", body: settings, csrfToken }),
   metrics: () => request<MetricsSnapshot>("/api/v1/metrics"),
-  reload: (csrfToken: string) => request<unknown>("/api/v1/reload", { method: "POST", csrfToken }),
+  reload: (csrfToken: string) => request<ReloadResult>("/api/v1/reload", { method: "POST", csrfToken }),
   clients: () => request<Client[]>("/api/v1/clients"),
   createClient: (input: ClientInput, csrfToken: string) =>
     request<Client>("/api/v1/clients", { method: "POST", body: input, csrfToken }),
@@ -140,5 +143,10 @@ export const api = {
     request<unknown>("/api/v1/restore", { method: "POST", body: { backup_id: backupId }, csrfToken }),
   exportPanel: () => request<unknown>("/api/v1/export"),
   importPanel: (doc: unknown, csrfToken: string) =>
-    request<ImportResult>("/api/v1/import", { method: "POST", body: doc, csrfToken })
+    request<ImportResult>("/api/v1/import", { method: "POST", body: doc, csrfToken }),
+  apiKeys: () => request<APIKey[]>("/api/v1/api-keys"),
+  createApiKey: (name: string, csrfToken: string) =>
+    request<APIKeyCreateResponse>("/api/v1/api-keys", { method: "POST", body: { name }, csrfToken }),
+  revokeApiKey: (id: number, csrfToken: string) =>
+    request<void>(`/api/v1/api-keys/${id}`, { method: "DELETE", csrfToken })
 };

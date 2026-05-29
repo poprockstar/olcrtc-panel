@@ -1,24 +1,28 @@
 import type React from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Activity,
   Archive,
-  BarChart3,
   CheckCircle2,
   Clipboard,
   Copy,
   Download,
+  FileKey2,
   FileText,
+  KeyRound,
   LogOut,
+  Plus,
   RefreshCw,
   Save,
+  Search,
   Server,
   Settings as SettingsIcon,
-  Smartphone,
+  ShieldCheck,
+  Trash2,
   Upload,
   Users,
-  XCircle
+  X
 } from "lucide-react";
 import QRCode from "qrcode";
 import { api, ApiError, panelUrl } from "./api";
@@ -26,22 +30,44 @@ import {
   asNumberOrNull,
   formatBytes,
   formatUptime,
+  formFromTransportPayload,
+  hasAdvancedTransportPayload,
   parseSubscriptionUris,
+  payloadFromTransportForm,
   providerSupportsTransport,
   providers,
+  transportDefaults,
   transports,
-  transportsForProvider
+  validateAdvancedTransportJson
 } from "./domain";
-import { browserLocale, copy } from "./i18n";
+import { browserLocale, copy, type CopyText } from "./i18n";
 import { clearStoredSession, loadStoredSession, saveStoredSession } from "./session";
-import type { BackupRecord, Client, Location, Locale, MetricsSnapshot, Provider, Settings, Transport } from "./types";
+import type {
+  APIKey,
+  BackupRecord,
+  Client,
+  ClientInput,
+  Locale,
+  Location,
+  LocationInput,
+  MetricsSnapshot,
+  Provider,
+  ReloadResult,
+  Settings,
+  Transport
+} from "./types";
 
-type Screen = "dashboard" | "clients" | "logs" | "settings" | "backups";
-
-type SessionState = {
-  username: string;
-  csrfToken: string;
-};
+type Screen = "overview" | "clients" | "runtime" | "backups" | "security" | "settings";
+type SessionState = { username: string; csrfToken: string };
+type DrawerState =
+  | { kind: "client"; client?: Client }
+  | { kind: "location"; clientId: string; location?: Location }
+  | null;
+type ConfirmState =
+  | { kind: "delete-client"; client: Client }
+  | { kind: "delete-location"; clientId: string; location: Location }
+  | { kind: "rotate"; client: Client }
+  | null;
 
 export function App() {
   const queryClient = useQueryClient();
@@ -69,29 +95,19 @@ export function App() {
   };
 
   if (stateQuery.isLoading) {
-    return <LoadingPanel />;
+    return <LoadingPanel text={copy[locale]} />;
   }
-
   if (stateQuery.error) {
-    return <CenteredMessage title="OlcRTC Panel" message={errorMessage(stateQuery.error)} />;
+    return <CenteredMessage title="OlcRTC Panel" message={errorMessage(stateQuery.error, copy[locale])} />;
   }
-
   if (stateQuery.data?.setup_required) {
     return <AuthScreen mode="setup" locale={locale} onSuccess={enterSession} />;
   }
-
   if (!authenticated) {
     return <AuthScreen mode="login" locale={locale} onSuccess={enterSession} />;
   }
 
-  return (
-    <AdminShell
-      locale={locale}
-      session={session!}
-      settings={settingsQuery.data}
-      onLogout={leaveSession}
-    />
-  );
+  return <AdminShell locale={locale} session={session!} settings={settingsQuery.data} onLogout={leaveSession} />;
 }
 
 function AuthScreen({
@@ -144,7 +160,7 @@ function AuthScreen({
             <span>{text.password}</span>
             <input name="password" type="password" autoComplete={mode === "setup" ? "new-password" : "current-password"} />
           </label>
-          {(formError || mutation.error) && <p className="error-line">{formError || errorMessage(mutation.error)}</p>}
+          {(formError || mutation.error) && <p className="error-line">{formError || errorMessage(mutation.error, text)}</p>}
           <button className="primary-action" type="submit" disabled={mutation.isPending}>
             <CheckCircle2 aria-hidden="true" />
             {mode === "setup" ? text.createAdmin : text.signIn}
@@ -167,25 +183,26 @@ function AdminShell({
   onLogout: () => void;
 }) {
   const text = copy[locale];
-  const [screen, setScreen] = useState<Screen>("dashboard");
+  const [screen, setScreen] = useState<Screen>("overview");
+  const [lastReload, setLastReload] = useState<ReloadResult | null>(null);
   const queryClient = useQueryClient();
-  const logout = useMutation({
-    mutationFn: () => api.logout(session.csrfToken),
-    onSettled: onLogout
-  });
+  const metrics = useQuery({ queryKey: ["metrics"], queryFn: api.metrics, refetchInterval: 15000 });
+  const logout = useMutation({ mutationFn: () => api.logout(session.csrfToken), onSettled: onLogout });
   const reload = useMutation({
     mutationFn: () => api.reload(session.csrfToken),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+    onSuccess: (result) => {
+      setLastReload(result);
+      void queryClient.invalidateQueries({ queryKey: ["locations"] });
       void queryClient.invalidateQueries({ queryKey: ["clients"] });
     }
   });
   const nav = [
-    ["dashboard", BarChart3, text.dashboard],
+    ["overview", Activity, text.overview],
     ["clients", Users, text.clients],
-    ["logs", FileText, text.logs],
-    ["settings", SettingsIcon, text.settings],
-    ["backups", Archive, text.backups]
+    ["runtime", FileText, text.runtimeLogs],
+    ["backups", Archive, text.backups],
+    ["security", ShieldCheck, text.securityApiKeys],
+    ["settings", SettingsIcon, text.settings]
   ] as const;
 
   return (
@@ -215,31 +232,34 @@ function AdminShell({
         <header className="topbar">
           <div>
             <h1>{nav.find(([key]) => key === screen)?.[2]}</h1>
-            <p>127.0.0.1 local node</p>
+            <p>{nodeHealthLabel(metrics.data, text)}</p>
           </div>
-          <button className="secondary-action" type="button" onClick={() => reload.mutate()} disabled={reload.isPending}>
-            <RefreshCw aria-hidden="true" />
-            {text.reload}
-          </button>
+          <div className="topbar-actions">
+            {lastReload && <ReloadSummary result={lastReload} text={text} />}
+            {reload.error && <p className="error-line">{text.reloadFailed}: {errorMessage(reload.error, text)}</p>}
+            <button className="secondary-action" type="button" onClick={() => reload.mutate()} disabled={reload.isPending}>
+              <RefreshCw aria-hidden="true" />
+              {text.reload}
+            </button>
+          </div>
         </header>
-        {reload.error && <p className="error-line">{errorMessage(reload.error)}</p>}
-        {screen === "dashboard" && <Dashboard />}
-        {screen === "clients" && <ClientsView csrfToken={session.csrfToken} settings={settings} />}
-        {screen === "logs" && <LogsView />}
-        {screen === "settings" && settings && <SettingsView csrfToken={session.csrfToken} settings={settings} />}
-        {screen === "backups" && <BackupsView csrfToken={session.csrfToken} settings={settings} />}
+        {screen === "overview" && <Overview metrics={metrics} text={text} />}
+        {screen === "clients" && <ClientsView csrfToken={session.csrfToken} settings={settings} text={text} />}
+        {screen === "runtime" && <LogsView text={text} />}
+        {screen === "backups" && <BackupsView csrfToken={session.csrfToken} settings={settings} text={text} />}
+        {screen === "security" && <APIKeysView csrfToken={session.csrfToken} text={text} />}
+        {screen === "settings" && settings && <SettingsView csrfToken={session.csrfToken} settings={settings} text={text} />}
       </section>
     </main>
   );
 }
 
-function Dashboard() {
-  const metrics = useQuery({ queryKey: ["metrics"], queryFn: api.metrics, refetchInterval: 15000 });
+function Overview({ metrics, text }: { metrics: ReturnType<typeof useQuery<MetricsSnapshot>>; text: CopyText }) {
   if (metrics.isLoading) {
-    return <LoadingPanel />;
+    return <LoadingPanel text={text} />;
   }
   if (metrics.error) {
-    return <CenteredMessage title="Dashboard unavailable" message={errorMessage(metrics.error)} />;
+    return <CenteredMessage title={text.overview} message={errorMessage(metrics.error, text)} />;
   }
   const snapshot = metrics.data;
   if (!snapshot) {
@@ -247,30 +267,30 @@ function Dashboard() {
   }
   return (
     <div className="screen-grid">
-      <MetricGroup snapshot={snapshot} />
+      <MetricGroup snapshot={snapshot} text={text} />
       <section className="panel-wide">
-        <h2>Per-client traffic</h2>
+        <h2>{text.perClientTraffic}</h2>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Client</th>
-                <th>Traffic</th>
-                <th>Quota</th>
-                <th>Locations</th>
-                <th>Processes</th>
+                <th>{text.clients}</th>
+                <th>{text.traffic}</th>
+                <th>{text.quota}</th>
+                <th>{text.locations}</th>
+                <th>{text.processes}</th>
               </tr>
             </thead>
             <tbody>
               {snapshot.per_client.length === 0 ? (
-                <tr><td colSpan={5}>No clients yet.</td></tr>
+                <tr><td colSpan={5}>{text.noClients}</td></tr>
               ) : snapshot.per_client.map((client) => (
                 <tr key={client.client_id}>
                   <td>{client.name}</td>
                   <td>{formatBytes(client.traffic_bytes)}</td>
-                  <td><StatusBadge tone={client.quota_exceeded ? "bad" : client.quota_warning ? "warn" : "good"}>{client.quota_bytes == null ? "unlimited" : formatBytes(client.quota_bytes)}</StatusBadge></td>
+                  <td><StatusBadge tone={client.quota_exceeded ? "bad" : client.quota_warning ? "warn" : "good"}>{client.quota_bytes == null ? text.unlimited : formatBytes(client.quota_bytes)}</StatusBadge></td>
                   <td>{client.locations}</td>
-                  <td>{client.processes.running} running, {client.processes.failed} failed</td>
+                  <td>{client.processes.running} {text.running}, {client.processes.failed} {text.failed}</td>
                 </tr>
               ))}
             </tbody>
@@ -281,17 +301,17 @@ function Dashboard() {
   );
 }
 
-function MetricGroup({ snapshot }: { snapshot: MetricsSnapshot }) {
+function MetricGroup({ snapshot, text }: { snapshot: MetricsSnapshot; text: CopyText }) {
   return (
     <div className="metrics-grid">
-      <Metric icon={<Activity />} label="Uptime" value={formatUptime(snapshot.panel.uptime_seconds)} />
-      <Metric icon={<Users />} label="Clients" value={`${snapshot.clients.enabled}/${snapshot.clients.total}`} detail={`${snapshot.clients.expired} expired`} />
-      <Metric icon={<Server />} label="Locations" value={`${snapshot.locations.enabled}/${snapshot.locations.total}`} />
-      <Metric icon={<RefreshCw />} label="Processes" value={`${snapshot.processes.running} running`} detail={`${snapshot.processes.failed} failed`} />
-      <Metric icon={<BarChart3 />} label="Traffic" value={formatBytes(snapshot.traffic.total_bytes)} detail={`${formatBytes(snapshot.traffic.rx_bytes)} RX`} />
-      <Metric icon={<XCircle />} label="Quota alerts" value={`${snapshot.quotas.exceeded} exceeded`} detail={`${snapshot.quotas.warning} warning`} />
-      <Metric icon={<Smartphone />} label="CPU" value={snapshot.host.cpu_percent == null ? "n/a" : `${snapshot.host.cpu_percent.toFixed(1)}%`} />
-      <Metric icon={<Archive />} label="Disk" value={hostRatio(snapshot.host.disk_used_bytes, snapshot.host.disk_total_bytes)} />
+      <Metric icon={<Activity />} label={text.uptime} value={formatUptime(snapshot.panel.uptime_seconds)} />
+      <Metric icon={<Users />} label={text.clients} value={`${snapshot.clients.enabled}/${snapshot.clients.total}`} detail={`${snapshot.clients.expired} expired`} />
+      <Metric icon={<Server />} label={text.locations} value={`${snapshot.locations.enabled}/${snapshot.locations.total}`} />
+      <Metric icon={<RefreshCw />} label={text.processes} value={`${snapshot.processes.running} ${text.running}`} detail={`${snapshot.processes.failed} ${text.failed}`} />
+      <Metric icon={<Activity />} label={text.traffic} value={formatBytes(snapshot.traffic.total_bytes)} detail={`${formatBytes(snapshot.traffic.rx_bytes)} RX`} />
+      <Metric icon={<ShieldCheck />} label={text.quotaAlerts} value={`${snapshot.quotas.exceeded} exceeded`} detail={`${snapshot.quotas.warning} warning`} />
+      <Metric icon={<Server />} label={text.cpu} value={snapshot.host.cpu_percent == null ? "n/a" : `${snapshot.host.cpu_percent.toFixed(1)}%`} />
+      <Metric icon={<Archive />} label={text.disk} value={hostRatio(snapshot.host.disk_used_bytes, snapshot.host.disk_total_bytes)} />
     </div>
   );
 }
@@ -307,10 +327,14 @@ function Metric({ icon, label, value, detail }: { icon: React.ReactNode; label: 
   );
 }
 
-function ClientsView({ csrfToken, settings }: { csrfToken: string; settings?: Settings }) {
+function ClientsView({ csrfToken, settings, text }: { csrfToken: string; settings?: Settings; text: CopyText }) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [drawer, setDrawer] = useState<DrawerState>(null);
+  const [confirm, setConfirm] = useState<ConfirmState>(null);
   const clients = useQuery({ queryKey: ["clients"], queryFn: api.clients });
-  const selectedClient = clients.data?.find((client) => client.id === selectedId) ?? clients.data?.[0] ?? null;
+  const filtered = useMemo(() => clients.data?.filter((client) => client.name.toLowerCase().includes(query.toLowerCase())) ?? [], [clients.data, query]);
+  const selectedClient = clients.data?.find((client) => client.id === selectedId) ?? filtered[0] ?? clients.data?.[0] ?? null;
 
   useEffect(() => {
     if (!selectedId && clients.data?.[0]) {
@@ -319,220 +343,347 @@ function ClientsView({ csrfToken, settings }: { csrfToken: string; settings?: Se
   }, [clients.data, selectedId]);
 
   return (
-    <div className="two-column">
-      <section className="panel">
-        <h2>Clients</h2>
-        <ClientForm csrfToken={csrfToken} />
-        <div className="list-stack">
-          {clients.isLoading && <p>Loading clients...</p>}
-          {clients.error && <p className="error-line">{errorMessage(clients.error)}</p>}
-          {clients.data?.length === 0 && <p>No clients yet.</p>}
-          {clients.data?.map((client) => (
-            <button key={client.id} className={selectedClient?.id === client.id ? "row-button active" : "row-button"} onClick={() => setSelectedId(client.id)} aria-label={`Manage client ${client.name}`}>
-              <span>{client.name}</span>
-              <StatusBadge tone={client.enabled ? "good" : "bad"}>{client.enabled ? "enabled" : "disabled"}</StatusBadge>
+    <>
+      <div className="clients-workspace">
+        <section className="client-rail panel">
+          <div className="section-title-row">
+            <h2>{text.clients}</h2>
+            <button className="icon-button" type="button" onClick={() => setDrawer({ kind: "client" })} aria-label={text.newClient} title={text.newClient}>
+              <Plus aria-hidden="true" />
             </button>
+          </div>
+          <label className="search-field">
+            <Search aria-hidden="true" />
+            <span className="sr-only">{text.searchClients}</span>
+            <input type="search" role="searchbox" aria-label={text.searchClients} value={query} onChange={(event) => setQuery(event.currentTarget.value)} />
+          </label>
+          <div className="list-stack">
+            {clients.isLoading && <p>{text.loadingClients}</p>}
+            {clients.error && <p className="error-line">{errorMessage(clients.error, text)}</p>}
+            {clients.data?.length === 0 && <p>{text.noClients}</p>}
+            {filtered.map((client) => (
+              <button key={client.id} className={selectedClient?.id === client.id ? "client-row active" : "client-row"} onClick={() => setSelectedId(client.id)} aria-label={`Select client ${client.name}`}>
+                <span>
+                  <strong>{client.name}</strong>
+                  <small>{client.locations_count} {text.locations}</small>
+                </span>
+                <StatusBadge tone={client.enabled ? "good" : "bad"}>{client.enabled ? text.enabled : text.disabled}</StatusBadge>
+              </button>
+            ))}
+          </div>
+        </section>
+        <section className="client-detail">
+          {selectedClient ? (
+            <ClientDetail
+              client={selectedClient}
+              csrfToken={csrfToken}
+              settings={settings}
+              text={text}
+              onEditClient={() => setDrawer({ kind: "client", client: selectedClient })}
+              onDeleteClient={() => setConfirm({ kind: "delete-client", client: selectedClient })}
+              onRotate={() => setConfirm({ kind: "rotate", client: selectedClient })}
+              onAddLocation={() => setDrawer({ kind: "location", clientId: selectedClient.id })}
+              onEditLocation={(location) => setDrawer({ kind: "location", clientId: selectedClient.id, location })}
+              onDeleteLocation={(location) => setConfirm({ kind: "delete-location", clientId: selectedClient.id, location })}
+            />
+          ) : (
+            <section className="panel empty-panel"><p>{text.selectOrCreateClient}</p></section>
+          )}
+        </section>
+      </div>
+      {drawer?.kind === "client" && <ClientDrawer csrfToken={csrfToken} client={drawer.client} text={text} onClose={() => setDrawer(null)} />}
+      {drawer?.kind === "location" && <LocationDrawer csrfToken={csrfToken} clientId={drawer.clientId} location={drawer.location} text={text} onClose={() => setDrawer(null)} />}
+      {confirm && <ConfirmModal state={confirm} csrfToken={csrfToken} text={text} onClose={() => setConfirm(null)} />}
+    </>
+  );
+}
+
+function ClientDetail({
+  client,
+  csrfToken,
+  settings,
+  text,
+  onEditClient,
+  onDeleteClient,
+  onRotate,
+  onAddLocation,
+  onEditLocation,
+  onDeleteLocation
+}: {
+  client: Client;
+  csrfToken: string;
+  settings?: Settings;
+  text: CopyText;
+  onEditClient: () => void;
+  onDeleteClient: () => void;
+  onRotate: () => void;
+  onAddLocation: () => void;
+  onEditLocation: (location: Location) => void;
+  onDeleteLocation: (location: Location) => void;
+}) {
+  const locations = useQuery({ queryKey: ["locations", client.id], queryFn: () => api.locations(client.id), enabled: Boolean(client.id) });
+  const enabledLocations = locations.data?.filter((location) => location.enabled) ?? [];
+  return (
+    <div className="detail-stack">
+      <section className="panel">
+        <div className="detail-header">
+          <div>
+            <h2>{client.name}</h2>
+            <p>{client.id}</p>
+          </div>
+          <div className="button-row">
+            <button className="secondary-action" type="button" onClick={onEditClient}>{text.editClient}</button>
+            <button className="secondary-action" type="button" onClick={onRotate}><KeyRound aria-hidden="true" />{text.rotateCredentials}</button>
+            <button className="danger-action" type="button" onClick={onDeleteClient}><Trash2 aria-hidden="true" />{text.deleteClient}</button>
+          </div>
+        </div>
+        <dl className="kv-grid">
+          <div><dt>{text.subscriptionToken}</dt><dd>{client.subscription_token}</dd></div>
+          <div><dt>{text.usedQuota}</dt><dd>{formatBytes(client.quota_used_bytes)}</dd></div>
+          <div><dt>{text.quota}</dt><dd>{formatBytes(client.quota_bytes)}</dd></div>
+          <div><dt>{text.expiry}</dt><dd>{client.expiry_state}</dd></div>
+        </dl>
+      </section>
+      <SubscriptionPanel client={client} settings={settings} locations={enabledLocations} locationsLoading={locations.isLoading} text={text} />
+      <section className="panel-wide">
+        <div className="detail-header">
+          <h3>{text.locations}</h3>
+          <button className="secondary-action" type="button" onClick={onAddLocation}><Plus aria-hidden="true" />{text.addLocation}</button>
+        </div>
+        <div className="location-grid">
+          {locations.isLoading && <p>{text.loadingLocations}</p>}
+          {locations.error && <p className="error-line">{errorMessage(locations.error, text)}</p>}
+          {locations.data?.length === 0 && <p>{text.noLocations}</p>}
+          {locations.data?.map((location) => (
+            <article className="location-card" key={location.id}>
+              <div className="detail-header">
+                <div>
+                  <h4>{location.name}</h4>
+                  <p>{location.id}</p>
+                </div>
+                <StatusBadge tone={location.runtime_status === "failed" ? "bad" : location.runtime_status === "running" ? "good" : "muted"}>{location.runtime_status}</StatusBadge>
+              </div>
+              <dl className="mini-kv">
+                <div><dt>{text.provider}</dt><dd>{location.provider}</dd></div>
+                <div><dt>{text.transport}</dt><dd>{location.transport}</dd></div>
+                <div><dt>{text.dns}</dt><dd>{location.dns}</dd></div>
+                <div><dt>{text.speedLimitBps}</dt><dd>{formatBytes(location.speed_limit_bps)}</dd></div>
+                <div><dt>{text.roomId}</dt><dd>{location.room_id}</dd></div>
+                <div><dt>{text.stability}</dt><dd>{location.transport_stability}</dd></div>
+                <div><dt>{text.updated}</dt><dd>{formatDate(location.updated_at)}</dd></div>
+              </dl>
+              <div className="button-row">
+                <button className="secondary-action" type="button" onClick={() => onEditLocation(location)}>{text.editLocation}</button>
+                <button className="danger-action" type="button" onClick={() => onDeleteLocation(location)}>{text.deleteLocation}</button>
+              </div>
+            </article>
           ))}
         </div>
       </section>
-      <section className="panel detail-panel">
-        {selectedClient ? <ClientDetail client={selectedClient} csrfToken={csrfToken} settings={settings} /> : <p>Select or create a client.</p>}
-      </section>
     </div>
   );
 }
 
-function ClientForm({ csrfToken }: { csrfToken: string }) {
+function ClientDrawer({ csrfToken, client, text, onClose }: { csrfToken: string; client?: Client; text: CopyText; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState("");
-  const create = useMutation({
-    mutationFn: (input: ReturnType<typeof clientInputFromForm>) => api.createClient(input, csrfToken),
+  const save = useMutation({
+    mutationFn: (input: ClientInput) => client ? api.updateClient(client.id, input, csrfToken) : api.createClient(input, csrfToken),
     onSuccess: () => {
-      setError("");
       void queryClient.invalidateQueries({ queryKey: ["clients"] });
-      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+      onClose();
     },
-    onError: (err) => setError(errorMessage(err))
+    onError: (err) => setError(errorMessage(err, text))
   });
-
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    create.mutate(clientInputFromForm(new FormData(event.currentTarget)));
+    setError("");
+    save.mutate(clientInputFromForm(new FormData(event.currentTarget)));
   };
-
   return (
-    <form className="form-grid compact" onSubmit={submit}>
-      <label>
-        <span>Client name</span>
-        <input name="name" />
-      </label>
-      <label>
-        <span>Quota bytes</span>
-        <input name="quota_bytes" inputMode="numeric" />
-      </label>
-      <label>
-        <span>Expires at</span>
-        <input name="expires_at" type="datetime-local" />
-      </label>
-      <label className="checkbox-line">
-        <input name="enabled" type="checkbox" defaultChecked />
-        <span>Enabled</span>
-      </label>
-      {error && <p className="error-line">{error}</p>}
-      <button className="secondary-action" type="submit" disabled={create.isPending}>
-        <Save aria-hidden="true" />
-        Save client
-      </button>
-    </form>
+    <Drawer title={client ? text.editClient : text.newClient} onClose={onClose}>
+      <form className="form-grid" onSubmit={submit}>
+        <label><span>{text.clientName}</span><input name="name" defaultValue={client?.name ?? ""} /></label>
+        <label><span>{text.quotaBytes}</span><input name="quota_bytes" inputMode="numeric" defaultValue={client?.quota_bytes ?? ""} /></label>
+        <label><span>{text.expiresAt}</span><input name="expires_at" type="datetime-local" defaultValue={datetimeLocalValue(client?.expires_at)} /></label>
+        <label className="checkbox-line"><input name="enabled" type="checkbox" defaultChecked={client?.enabled ?? true} /><span>{text.enabled}</span></label>
+        {error && <p className="error-line">{error}</p>}
+        <button className="primary-action" type="submit" disabled={save.isPending}><Save aria-hidden="true" />{client ? text.saveClient : text.createClient}</button>
+      </form>
+    </Drawer>
   );
 }
 
-function ClientDetail({ client, csrfToken, settings }: { client: Client; csrfToken: string; settings?: Settings }) {
-  const locations = useQuery({ queryKey: ["locations", client.id], queryFn: () => api.locations(client.id), enabled: Boolean(client.id) });
-  return (
-    <div className="detail-stack">
-      <div className="detail-header">
-        <div>
-          <h2>{client.name}</h2>
-          <p>{client.id}</p>
-        </div>
-        <StatusBadge tone={client.quota_state === "exceeded" || client.expiry_state === "expired" ? "bad" : "good"}>{client.quota_state}</StatusBadge>
-      </div>
-      <dl className="kv-grid">
-        <div><dt>Subscription token</dt><dd>{client.subscription_token}</dd></div>
-        <div><dt>Used quota</dt><dd>{formatBytes(client.quota_used_bytes)}</dd></div>
-        <div><dt>Quota</dt><dd>{formatBytes(client.quota_bytes)}</dd></div>
-        <div><dt>Expiry</dt><dd>{client.expiry_state}</dd></div>
-      </dl>
-      <SubscriptionPanel client={client} settings={settings} />
-      <LocationForm clientId={client.id} csrfToken={csrfToken} />
-      <div className="table-wrap">
-        <table>
-          <thead><tr><th>Name</th><th>Provider</th><th>Transport</th><th>Status</th><th>DNS</th></tr></thead>
-          <tbody>
-            {locations.data?.length === 0 && <tr><td colSpan={5}>No locations yet.</td></tr>}
-            {locations.data?.map((location) => (
-              <tr key={location.id}>
-                <td>{location.name}</td>
-                <td>{location.provider}</td>
-                <td>{location.transport}</td>
-                <td><StatusBadge tone={location.runtime_status === "failed" ? "bad" : location.runtime_status === "running" ? "good" : "muted"}>{location.runtime_status}</StatusBadge></td>
-                <td>{location.dns}</td>
-              </tr>
-            ))}
-            {locations.isLoading && <tr><td colSpan={5}>Loading locations...</td></tr>}
-            {locations.error && <tr><td colSpan={5} className="error-line">{errorMessage(locations.error)}</td></tr>}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function LocationForm({ clientId, csrfToken }: { clientId: string; csrfToken: string }) {
+function LocationDrawer({ csrfToken, clientId, location, text, onClose }: { csrfToken: string; clientId: string; location?: Location; text: CopyText; onClose: () => void }) {
   const queryClient = useQueryClient();
-  const [provider, setProvider] = useState<Provider>("wbstream");
-  const [transport, setTransport] = useState<Transport>("datachannel");
+  const [provider, setProvider] = useState<Provider>(location?.provider ?? "wbstream");
+  const [transport, setTransport] = useState<Transport>(location?.transport ?? "datachannel");
+  const [payloadValues, setPayloadValues] = useState(() => formFromTransportPayload(location?.transport ?? "datachannel", location?.transport_payload ?? {}));
+  const [advanced, setAdvanced] = useState(() => Boolean(location && hasAdvancedTransportPayload(location.transport, location.transport_payload)));
+  const [advancedText, setAdvancedText] = useState(() => location ? JSON.stringify(location.transport_payload, null, 2) : "{}");
   const [error, setError] = useState("");
-  const create = useMutation({
-    mutationFn: (input: ReturnType<typeof locationInputFromForm>) => api.createLocation(clientId, input, csrfToken),
+  const save = useMutation({
+    mutationFn: (input: LocationInput) =>
+      location ? api.updateLocation(clientId, location.id, input, csrfToken) : api.createLocation(clientId, input, csrfToken),
     onSuccess: () => {
-      setError("");
       void queryClient.invalidateQueries({ queryKey: ["locations", clientId] });
       void queryClient.invalidateQueries({ queryKey: ["clients"] });
-      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+      onClose();
     },
-    onError: (err) => setError(errorMessage(err))
+    onError: (err) => setError(errorMessage(err, text))
   });
 
+  const changeTransport = (next: Transport) => {
+    setTransport(next);
+    setPayloadValues(transportDefaults(next));
+    setAdvanced(false);
+    setAdvancedText("{}");
+  };
+  const updatePayload = (key: string, value: string) => setPayloadValues((current) => ({ ...current, [key]: value }));
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    setError("");
     if (!providerSupportsTransport(provider, transport)) {
-      setError("Transport is not supported by selected provider.");
+      setError(text.unsupportedTransport);
       return;
     }
-    create.mutate(locationInputFromForm(new FormData(event.currentTarget), provider, transport));
+    const form = new FormData(event.currentTarget);
+    const advancedPayload = advanced ? validateAdvancedTransportJson(advancedText) : null;
+    if (advancedPayload && !advancedPayload.ok) {
+      setError(advancedPayload.error.includes("valid") ? text.jsonMustBeValid : text.jsonMustBeObject);
+      return;
+    }
+    save.mutate(locationInputFromForm(form, provider, transport, advancedPayload?.value ?? payloadFromTransportForm(transport, payloadValues)));
   };
 
   return (
-    <form className="form-grid compact" onSubmit={submit}>
-      <h3>Add location</h3>
-      <label><span>Location name</span><input name="name" /></label>
-      <label>
-        <span>Provider</span>
-        <select name="provider" value={provider} onChange={(event) => {
-          const next = event.currentTarget.value as Provider;
-          setProvider(next);
-          if (!providerSupportsTransport(next, transport)) {
-            setTransport(transportsForProvider(next)[0]);
-          }
-        }}>
-          {providers.map((item) => <option key={item} value={item}>{item}</option>)}
-        </select>
-      </label>
-      <label>
-        <span>Transport</span>
-        <select name="transport" value={transport} onChange={(event) => setTransport(event.currentTarget.value as Transport)}>
-          {transports.map((item) => <option key={item} value={item}>{item}</option>)}
-        </select>
-      </label>
-      <label><span>DNS</span><input name="dns" defaultValue="8.8.8.8:53" /></label>
-      <label><span>Speed limit BPS</span><input name="speed_limit_bps" inputMode="numeric" /></label>
-      <label><span>Transport payload JSON</span><textarea name="transport_payload" defaultValue="{}" /></label>
-      <label className="checkbox-line"><input name="enabled" type="checkbox" defaultChecked /><span>Enabled</span></label>
-      {error && <p className="error-line">{error}</p>}
-      <button className="secondary-action" type="submit" disabled={create.isPending}>
-        <Save aria-hidden="true" />
-        Save location
-      </button>
-    </form>
+    <Drawer title={location ? text.editLocation : text.addLocation} onClose={onClose}>
+      <form className="form-grid" onSubmit={submit}>
+        <label><span>{text.locationName}</span><input name="name" defaultValue={location?.name ?? ""} /></label>
+        <div className="split-grid">
+          <label>
+            <span>{text.provider}</span>
+            <select name="provider" value={provider} onChange={(event) => setProvider(event.currentTarget.value as Provider)}>
+              {providers.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>{text.transport}</span>
+            <select name="transport" value={transport} onChange={(event) => changeTransport(event.currentTarget.value as Transport)}>
+              {transports.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </label>
+        </div>
+        <TransportPresetFields transport={transport} values={payloadValues} onChange={updatePayload} text={text} />
+        <label><span>{text.dns}</span><input name="dns" defaultValue={location?.dns ?? "8.8.8.8:53"} /></label>
+        <label><span>{text.speedLimitBps}</span><input name="speed_limit_bps" inputMode="numeric" defaultValue={location?.speed_limit_bps ?? ""} /></label>
+        <label><span>{text.roomId}</span><input name="room_id" defaultValue={location?.room_id ?? ""} /></label>
+        <label><span>{text.cryptoKey}</span><input name="crypto_key" defaultValue={location?.crypto_key ?? ""} /></label>
+        <label className="checkbox-line"><input name="enabled" type="checkbox" defaultChecked={location?.enabled ?? true} /><span>{text.enabled}</span></label>
+        <label className="checkbox-line"><input type="checkbox" checked={advanced} onChange={(event) => setAdvanced(event.currentTarget.checked)} /><span>{text.advancedJson}</span></label>
+        {advanced && <label><span>{text.transportPayloadJson}</span><textarea name="transport_payload" value={advancedText} onChange={(event) => setAdvancedText(event.currentTarget.value)} /></label>}
+        {error && <p className="error-line">{error}</p>}
+        <button className="primary-action" type="submit" disabled={save.isPending}><Save aria-hidden="true" />{text.saveLocation}</button>
+      </form>
+    </Drawer>
   );
 }
 
-function SubscriptionPanel({ client, settings }: { client: Client; settings?: Settings }) {
+function TransportPresetFields({ transport, values, onChange, text }: { transport: Transport; values: Record<string, string>; onChange: (key: string, value: string) => void; text: CopyText }) {
+  if (transport === "datachannel") {
+    return <p className="muted-line">datachannel</p>;
+  }
+  if (transport === "vp8channel") {
+    return (
+      <div className="split-grid">
+        <PayloadInput label={text.fps} field="fps" values={values} onChange={onChange} />
+        <PayloadInput label={text.batchSize} field="batch_size" values={values} onChange={onChange} />
+      </div>
+    );
+  }
+  if (transport === "seichannel") {
+    return (
+      <div className="split-grid">
+        <PayloadInput label={text.fps} field="fps" values={values} onChange={onChange} />
+        <PayloadInput label={text.batchSize} field="batch_size" values={values} onChange={onChange} />
+        <PayloadInput label={text.fragmentSize} field="fragment_size" values={values} onChange={onChange} />
+        <PayloadInput label={text.ackTimeoutMs} field="ack_timeout_ms" values={values} onChange={onChange} />
+      </div>
+    );
+  }
+  return (
+    <div className="split-grid">
+      <label><span>{text.codec}</span><select value={values.codec} onChange={(event) => onChange("codec", event.currentTarget.value)}><option value="qrcode">qrcode</option><option value="tile">tile</option></select></label>
+      <PayloadInput label={text.width} field="width" values={values} onChange={onChange} />
+      <PayloadInput label={text.height} field="height" values={values} onChange={onChange} />
+      <PayloadInput label={text.fps} field="fps" values={values} onChange={onChange} />
+      <PayloadInput label={text.bitrate} field="bitrate" values={values} onChange={onChange} />
+      <label><span>{text.hardware}</span><select value={values.hw} onChange={(event) => onChange("hw", event.currentTarget.value)}><option value="none">none</option><option value="nvenc">nvenc</option></select></label>
+      <label><span>{text.qrRecovery}</span><select value={values.qr_recovery} onChange={(event) => onChange("qr_recovery", event.currentTarget.value)}><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="highest">highest</option></select></label>
+      <PayloadInput label={text.qrSize} field="qr_size" values={values} onChange={onChange} />
+      <PayloadInput label={text.tileModule} field="tile_module" values={values} onChange={onChange} />
+      <PayloadInput label={text.tileRs} field="tile_rs" values={values} onChange={onChange} />
+    </div>
+  );
+}
+
+function PayloadInput({ label, field, values, onChange }: { label: string; field: string; values: Record<string, string>; onChange: (key: string, value: string) => void }) {
+  return <label><span>{label}</span><input value={values[field] ?? ""} onChange={(event) => onChange(field, event.currentTarget.value)} /></label>;
+}
+
+function SubscriptionPanel({ client, settings, locations, locationsLoading, text }: { client: Client; settings?: Settings; locations: Location[]; locationsLoading: boolean; text: CopyText }) {
   const subscriptionUrl = panelUrl(`/sub/${client.subscription_token}`);
   const publicUrl = panelUrl(`/c/${client.id}`);
   const [plainText, setPlainText] = useState("");
   const [selectedUri, setSelectedUri] = useState("");
   const subscription = useMutation({
     mutationFn: () => api.subscription(client.subscription_token),
-    onSuccess: (text) => {
-      setPlainText(text);
-      setSelectedUri(parseSubscriptionUris(text)[0] ?? "");
+    onSuccess: (body) => {
+      setPlainText(body);
+      setSelectedUri(parseSubscriptionUris(body)[0] ?? "");
     }
   });
+  const unavailable = subscriptionUnavailableReason(client, locations, locationsLoading, text);
   const uris = parseSubscriptionUris(plainText);
 
   return (
     <section className="sub-panel">
       <div className="detail-header">
-        <h3>Subscription</h3>
-        <button className="secondary-action" type="button" onClick={() => subscription.mutate()}>
+        <h3>{text.subscription}</h3>
+        <button className="secondary-action" type="button" onClick={() => subscription.mutate()} disabled={Boolean(unavailable)}>
           <Clipboard aria-hidden="true" />
-          Load subscription
+          {text.loadSubscription}
         </button>
       </div>
-      <div className="copy-row">
-        <code>{subscriptionUrl}</code>
-        <CopyButton value={subscriptionUrl} label="Copy private subscription URL" />
-      </div>
-      {settings?.public_client_endpoint_enabled && <div className="copy-row"><code>{publicUrl}</code><CopyButton value={publicUrl} label="Copy public client URL" /></div>}
-      {subscription.error && <p className="error-line">{errorMessage(subscription.error)}</p>}
+      {unavailable && <p className="error-line">{unavailable}</p>}
+      <LabeledCopyRow label={text.privateSubscriptionUrl} value={subscriptionUrl} copyLabel={text.copyPrivateSubscriptionUrl} />
+      {settings?.public_client_endpoint_enabled && <LabeledCopyRow label={text.publicClientUrl} value={publicUrl} copyLabel={text.copyPublicClientUrl} />}
+      {subscription.error && <p className="error-line">{errorMessage(subscription.error, text)}</p>}
       <div className="qr-grid">
         <QrCode value={subscriptionUrl} />
         {selectedUri && <QrCode value={selectedUri} />}
       </div>
-      {uris.length > 0 && (
-        <div className="uri-list">
-          {uris.map((uri) => (
-            <button key={uri} className={selectedUri === uri ? "row-button active" : "row-button"} onClick={() => setSelectedUri(uri)}>
-              <span>{uri}</span>
-              <Copy aria-hidden="true" />
-            </button>
-          ))}
-        </div>
-      )}
+      <div className="uri-list">
+        <h4>{text.parsedUris}</h4>
+        {uris.length === 0 && <p>{text.noUris}</p>}
+        {uris.map((uri) => (
+          <button key={uri} className={selectedUri === uri ? "row-button active" : "row-button"} onClick={() => setSelectedUri(uri)}>
+            <span>{uri}</span>
+            <Copy aria-hidden="true" />
+          </button>
+        ))}
+      </div>
     </section>
+  );
+}
+
+function LabeledCopyRow({ label, value, copyLabel }: { label: string; value: string; copyLabel: string }) {
+  return (
+    <div className="copy-row">
+      <span>{label}</span>
+      <code>{value}</code>
+      <CopyButton value={value} label={copyLabel} />
+    </div>
   );
 }
 
@@ -552,7 +703,93 @@ function QrCode({ value }: { value: string }) {
   return <img className="qr-code" data-testid="qr-code" src={src || undefined} alt="QR code" />;
 }
 
-function LogsView() {
+function ConfirmModal({ state, csrfToken, text, onClose }: { state: ConfirmState; csrfToken: string; text: CopyText; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [rotateToken, setRotateToken] = useState(false);
+  const [rotateKeys, setRotateKeys] = useState(false);
+  const [rotateRooms, setRotateRooms] = useState(false);
+  const [error, setError] = useState("");
+  const deleteClient = useMutation({
+    mutationFn: (client: Client) => api.deleteClient(client.id, csrfToken),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["clients"] });
+      onClose();
+    },
+    onError: (err) => setError(errorMessage(err, text))
+  });
+  const deleteLocation = useMutation({
+    mutationFn: ({ clientId, locationId }: { clientId: string; locationId: string }) => api.deleteLocation(clientId, locationId, csrfToken),
+    onSuccess: (_, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["locations", variables.clientId] });
+      void queryClient.invalidateQueries({ queryKey: ["clients"] });
+      onClose();
+    },
+    onError: (err) => setError(errorMessage(err, text))
+  });
+  const rotate = useMutation({
+    mutationFn: async (client: Client) => {
+      if (rotateToken && rotateKeys && !rotateRooms) {
+        await api.rotateClient(client.id, { rotate_subscription_token: true }, csrfToken);
+        return api.rotateClient(client.id, {}, csrfToken);
+      }
+      return api.rotateClient(client.id, {
+        ...(rotateToken ? { rotate_subscription_token: true } : {}),
+        ...(rotateRooms ? { rotate_rooms: true } : {})
+      }, csrfToken);
+    },
+    onSuccess: (_, client) => {
+      void queryClient.invalidateQueries({ queryKey: ["locations", client.id] });
+      void queryClient.invalidateQueries({ queryKey: ["clients"] });
+      onClose();
+    },
+    onError: (err) => setError(errorMessage(err, text))
+  });
+
+  if (!state) {
+    return null;
+  }
+  if (state.kind === "delete-client") {
+    return (
+      <Modal title={text.deleteClient} onClose={onClose}>
+        <p>{text.confirmDeleteClient}</p>
+        {error && <p className="error-line">{error}</p>}
+        <div className="button-row">
+          <button className="secondary-action" type="button" onClick={onClose}>{text.cancel}</button>
+          <button className="danger-action" type="button" onClick={() => deleteClient.mutate(state.client)}>{text.delete}</button>
+        </div>
+      </Modal>
+    );
+  }
+  if (state.kind === "delete-location") {
+    return (
+      <Modal title={text.deleteLocation} onClose={onClose}>
+        <p>{text.confirmDeleteLocation}</p>
+        {error && <p className="error-line">{error}</p>}
+        <div className="button-row">
+          <button className="secondary-action" type="button" onClick={onClose}>{text.cancel}</button>
+          <button className="danger-action" type="button" onClick={() => deleteLocation.mutate({ clientId: state.clientId, locationId: state.location.id })}>{text.delete}</button>
+        </div>
+      </Modal>
+    );
+  }
+  return (
+    <Modal title={text.rotateCredentials} onClose={onClose}>
+      <p>{text.confirmRotate}</p>
+      <div className="form-grid compact">
+        <label className="checkbox-line"><input type="checkbox" checked={rotateToken} onChange={(event) => setRotateToken(event.currentTarget.checked)} /><span>{text.rotateSubscriptionToken}</span></label>
+        <label className="checkbox-line"><input type="checkbox" checked={rotateKeys} onChange={(event) => setRotateKeys(event.currentTarget.checked)} /><span>{text.rotateCryptoKeys}</span></label>
+        <label className="checkbox-line"><input type="checkbox" checked={rotateRooms} onChange={(event) => { setRotateRooms(event.currentTarget.checked); if (event.currentTarget.checked) setRotateKeys(true); }} /><span>{text.rotateRooms}</span></label>
+      </div>
+      {error && <p className="error-line">{error}</p>}
+      <div className="button-row">
+        <button className="secondary-action" type="button" onClick={onClose}>{text.cancel}</button>
+        <button className="primary-action" type="button" onClick={() => rotate.mutate(state.client)} disabled={!rotateToken && !rotateKeys && !rotateRooms}>{text.rotateNow}</button>
+      </div>
+    </Modal>
+  );
+}
+
+function LogsView({ text }: { text: CopyText }) {
   const [params, setParams] = useState(() => new URLSearchParams({ limit: "100" }));
   const logs = useQuery({ queryKey: ["logs", params.toString()], queryFn: () => api.logs(params) });
   const submit = (event: React.FormEvent<HTMLFormElement>) => {
@@ -570,8 +807,8 @@ function LogsView() {
   const downloadText = async () => {
     const textParams = new URLSearchParams(params);
     textParams.set("format", "text");
-    const text = await api.logsText(textParams);
-    const blob = new Blob([text], { type: "text/plain" });
+    const body = await api.logsText(textParams);
+    const blob = new Blob([body], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -582,29 +819,91 @@ function LogsView() {
 
   return (
     <section className="panel-wide">
-      <form className="filter-grid" onSubmit={submit}>
+      <form className="filter-grid" onSubmit={submit} aria-label={text.runtimeFilters}>
         <input name="level" placeholder="level" />
         <input name="source" placeholder="source" />
         <input name="client_id" placeholder="client id" />
         <input name="location_id" placeholder="location id" />
         <input name="q" placeholder="search" />
         <input name="limit" placeholder="limit" defaultValue="100" />
-        <button className="secondary-action" type="submit">Apply</button>
-        <button className="secondary-action" type="button" onClick={downloadText}><Copy aria-hidden="true" />Text</button>
+        <button className="secondary-action" type="submit">{text.apply}</button>
+        <button className="secondary-action" type="button" onClick={() => void downloadText()}><Copy aria-hidden="true" />{text.text}</button>
       </form>
-      {logs.error && <p className="error-line">{errorMessage(logs.error)}</p>}
+      {logs.error && <p className="error-line">{errorMessage(logs.error, text)}</p>}
       <div className="log-list">
-        {logs.isLoading && <p>Loading logs...</p>}
-        {logs.data?.entries.length === 0 && <p>No matching log entries.</p>}
-        {logs.data?.entries.map((entry, index) => (
-          <pre key={`${entry.time}-${index}`}>{JSON.stringify(entry, null, 2)}</pre>
-        ))}
+        {logs.isLoading && <p>{text.loadingLogs}</p>}
+        {logs.data?.entries.length === 0 && <p>{text.noLogs}</p>}
+        {logs.data?.entries.map((entry, index) => <pre key={`${entry.time}-${index}`}>{JSON.stringify(entry, null, 2)}</pre>)}
       </div>
     </section>
   );
 }
 
-function SettingsView({ csrfToken, settings }: { csrfToken: string; settings: Settings }) {
+function APIKeysView({ csrfToken, text }: { csrfToken: string; text: CopyText }) {
+  const queryClient = useQueryClient();
+  const keys = useQuery({ queryKey: ["api-keys"], queryFn: api.apiKeys });
+  const [token, setToken] = useState("");
+  const [error, setError] = useState("");
+  const create = useMutation({
+    mutationFn: (name: string) => api.createApiKey(name, csrfToken),
+    onSuccess: (result) => {
+      setToken(result.token);
+      setError("");
+      void queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+    },
+    onError: (err) => setError(errorMessage(err, text))
+  });
+  const revoke = useMutation({
+    mutationFn: (id: number) => api.revokeApiKey(id, csrfToken),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["api-keys"] }),
+    onError: (err) => setError(errorMessage(err, text))
+  });
+  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = String(new FormData(event.currentTarget).get("name") ?? "").trim();
+    create.mutate(name);
+    event.currentTarget.reset();
+  };
+  return (
+    <div className="screen-grid">
+      <section className="panel">
+        <div className="section-title-row"><h2>{text.apiKeys}</h2></div>
+        <form className="form-grid compact" onSubmit={submit}>
+          <label><span>{text.keyName}</span><input name="name" /></label>
+          <button className="primary-action" type="submit" disabled={create.isPending}><FileKey2 aria-hidden="true" />{text.createApiKey}</button>
+        </form>
+        {token && <LabeledCopyRow label={text.oneTimeToken} value={token} copyLabel={text.oneTimeToken} />}
+        {error && <p className="error-line">{error}</p>}
+      </section>
+      <section className="panel-wide">
+        <div className="table-wrap">
+          <table>
+            <thead><tr><th>{text.keyName}</th><th>{text.created}</th><th>{text.lastUsed}</th><th>{text.revoked}</th><th>{text.revoke}</th></tr></thead>
+            <tbody>
+              {keys.isLoading && <tr><td colSpan={5}>Loading...</td></tr>}
+              {keys.data?.length === 0 && <tr><td colSpan={5}>{text.noApiKeys}</td></tr>}
+              {keys.data?.map((key) => <APIKeyRow key={key.id} apiKey={key} text={text} onRevoke={() => revoke.mutate(key.id)} />)}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function APIKeyRow({ apiKey, text, onRevoke }: { apiKey: APIKey; text: CopyText; onRevoke: () => void }) {
+  return (
+    <tr>
+      <td>{apiKey.name}</td>
+      <td>{formatDate(apiKey.created_at)}</td>
+      <td>{apiKey.last_used_at ? formatDate(apiKey.last_used_at) : text.never}</td>
+      <td>{apiKey.revoked_at ? formatDate(apiKey.revoked_at) : "-"}</td>
+      <td><button className="danger-action" type="button" onClick={onRevoke} disabled={Boolean(apiKey.revoked_at)}>{text.revoke}</button></td>
+    </tr>
+  );
+}
+
+function SettingsView({ csrfToken, settings, text }: { csrfToken: string; settings: Settings; text: CopyText }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState(settings);
   const save = useMutation({
@@ -617,18 +916,18 @@ function SettingsView({ csrfToken, settings }: { csrfToken: string; settings: Se
   return (
     <section className="panel">
       <form className="form-grid" onSubmit={(event) => { event.preventDefault(); save.mutate(); }}>
-        <label><span>UI language</span><select value={draft.ui_locale} onChange={(event) => setDraft({ ...draft, ui_locale: event.currentTarget.value as Locale })}><option value="en">English</option><option value="ru">Русский</option></select></label>
-        <label className="checkbox-line"><input type="checkbox" checked={draft.public_client_endpoint_enabled} onChange={(event) => setDraft({ ...draft, public_client_endpoint_enabled: event.currentTarget.checked })} /><span>Public client endpoint</span></label>
-        <label><span>Backup path</span><input value={draft.backup_path} onChange={(event) => setDraft({ ...draft, backup_path: event.currentTarget.value })} /></label>
-        <label><span>Quota lock mode</span><select value={draft.quota_lock_mode} onChange={(event) => setDraft({ ...draft, quota_lock_mode: event.currentTarget.value as Settings["quota_lock_mode"] })}><option value="stop">stop</option><option value="disable_traffic">disable_traffic</option></select></label>
-        {save.error && <p className="error-line">{errorMessage(save.error)}</p>}
-        <button className="primary-action" type="submit" disabled={save.isPending}><Save aria-hidden="true" />Save settings</button>
+        <label><span>{text.uiLanguage}</span><select value={draft.ui_locale} onChange={(event) => setDraft({ ...draft, ui_locale: event.currentTarget.value as Locale })}><option value="en">English</option><option value="ru">Русский</option></select></label>
+        <label className="checkbox-line"><input type="checkbox" checked={draft.public_client_endpoint_enabled} onChange={(event) => setDraft({ ...draft, public_client_endpoint_enabled: event.currentTarget.checked })} /><span>{text.publicClientEndpoint}</span></label>
+        <label><span>{text.backupPath}</span><input value={draft.backup_path} onChange={(event) => setDraft({ ...draft, backup_path: event.currentTarget.value })} /></label>
+        <label><span>{text.quotaLockMode}</span><select value={draft.quota_lock_mode} onChange={(event) => setDraft({ ...draft, quota_lock_mode: event.currentTarget.value as Settings["quota_lock_mode"] })}><option value="stop">stop</option><option value="disable_traffic">disable_traffic</option></select></label>
+        {save.error && <p className="error-line">{errorMessage(save.error, text)}</p>}
+        <button className="primary-action" type="submit" disabled={save.isPending}><Save aria-hidden="true" />{text.saveSettings}</button>
       </form>
     </section>
   );
 }
 
-function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Settings }) {
+function BackupsView({ csrfToken, settings, text }: { csrfToken: string; settings?: Settings; text: CopyText }) {
   const queryClient = useQueryClient();
   const backups = useQuery({ queryKey: ["backups"], queryFn: api.backups });
   const [message, setMessage] = useState("");
@@ -642,7 +941,7 @@ function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Se
     },
     onError: (err) => {
       setMessage("");
-      setError(errorMessage(err));
+      setError(errorMessage(err, text));
     }
   });
   const restore = useMutation({
@@ -651,12 +950,11 @@ function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Se
       setMessage("Backup restored.");
       setError("");
       void queryClient.invalidateQueries({ queryKey: ["backups"] });
-      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
       void queryClient.invalidateQueries({ queryKey: ["clients"] });
     },
     onError: (err) => {
       setMessage("");
-      setError(errorMessage(err));
+      setError(errorMessage(err, text));
     }
   });
   const importMutation = useMutation({
@@ -665,11 +963,10 @@ function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Se
       setMessage(`Imported ${result.clients_created} clients and ${result.locations_created} locations.`);
       setError("");
       void queryClient.invalidateQueries({ queryKey: ["clients"] });
-      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
     },
     onError: (err) => {
       setMessage("");
-      setError(errorMessage(err));
+      setError(errorMessage(err, text));
     }
   });
 
@@ -692,7 +989,7 @@ function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Se
       setError("");
     } catch (err) {
       setMessage("");
-      setError(errorMessage(err));
+      setError(errorMessage(err, text));
     }
   };
   const importPanel = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -713,34 +1010,20 @@ function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Se
   return (
     <section className="panel-wide">
       <div className="detail-header">
-        <h2>Backups</h2>
+        <h2>{text.backups}</h2>
         <div className="button-row">
-          <button className="secondary-action" type="button" onClick={() => create.mutate()} disabled={create.isPending}>
-            <Archive aria-hidden="true" />
-            Create backup
-          </button>
-          <button className="secondary-action" type="button" onClick={() => void exportPanel()}>
-            <Download aria-hidden="true" />
-            Export JSON
-          </button>
-          <label className="secondary-action file-action">
-            <Upload aria-hidden="true" />
-            Import JSON
-            <input type="file" accept="application/json,.json" onChange={(event) => void importPanel(event)} />
-          </label>
+          <button className="secondary-action" type="button" onClick={() => create.mutate()} disabled={create.isPending}><Archive aria-hidden="true" />{text.createBackup}</button>
+          <button className="secondary-action" type="button" onClick={() => void exportPanel()}><Download aria-hidden="true" />{text.exportJson}</button>
+          <label className="secondary-action file-action"><Upload aria-hidden="true" />{text.importJson}<input type="file" accept="application/json,.json" onChange={(event) => void importPanel(event)} /></label>
         </div>
       </div>
-      <dl className="kv-grid">
-        <div><dt>Configured backup path</dt><dd>{settings?.backup_path ?? "Loading..."}</dd></div>
-      </dl>
+      <dl className="kv-grid"><div><dt>{text.configuredBackupPath}</dt><dd>{settings?.backup_path ?? "Loading..."}</dd></div></dl>
       {message && <p className="success-line">{message}</p>}
       {error && <p className="error-line">{error}</p>}
-      {backups.error && <p className="error-line">{errorMessage(backups.error)}</p>}
+      {backups.error && <p className="error-line">{errorMessage(backups.error, text)}</p>}
       <div className="table-wrap">
         <table>
-          <thead>
-            <tr><th>ID</th><th>File</th><th>Status</th><th>Size</th><th>Created</th><th>Action</th></tr>
-          </thead>
+          <thead><tr><th>ID</th><th>File</th><th>Status</th><th>Size</th><th>Created</th><th>Action</th></tr></thead>
           <tbody>
             {backups.isLoading && <tr><td colSpan={6}>Loading backups...</td></tr>}
             {backups.data?.length === 0 && <tr><td colSpan={6}>No backups yet.</td></tr>}
@@ -751,18 +1034,43 @@ function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Se
                 <td><StatusBadge tone={record.status === "completed" ? "good" : record.status === "error" ? "bad" : "muted"}>{record.status}</StatusBadge></td>
                 <td>{formatBytes(record.size_bytes)}</td>
                 <td>{formatDate(record.created_at)}</td>
-                <td>
-                  <button className="secondary-action" type="button" onClick={() => restoreBackup(record)} disabled={restore.isPending || record.status !== "completed"} aria-label={`Restore backup ${record.id}`}>
-                    <RefreshCw aria-hidden="true" />
-                    Restore
-                  </button>
-                </td>
+                <td><button className="secondary-action" type="button" onClick={() => restoreBackup(record)} disabled={restore.isPending || record.status !== "completed"} aria-label={`Restore backup ${record.id}`}><RefreshCw aria-hidden="true" />{text.restore}</button></td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
     </section>
+  );
+}
+
+function Drawer({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="drawer-layer">
+      <div className="drawer-scrim" onClick={onClose} />
+      <aside className="drawer" aria-labelledby="drawer-title">
+        <div className="detail-header">
+          <h2 id="drawer-title">{title}</h2>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close"><X aria-hidden="true" /></button>
+        </div>
+        {children}
+      </aside>
+    </div>
+  );
+}
+
+function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  return (
+    <div className="modal-layer">
+      <div className="modal-scrim" onClick={onClose} />
+      <section className="modal-panel" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <div className="detail-header">
+          <h2 id="modal-title">{title}</h2>
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close"><X aria-hidden="true" /></button>
+        </div>
+        <div className="modal-body">{children}</div>
+      </section>
+    </div>
   );
 }
 
@@ -774,15 +1082,49 @@ function CopyButton({ value, label }: { value: string; label: string }) {
   return <button className="icon-button" type="button" aria-label={label} title={label} onClick={() => void navigator.clipboard?.writeText(value)}><Copy aria-hidden="true" /></button>;
 }
 
-function LoadingPanel() {
-  return <CenteredMessage title="OlcRTC Panel" message="Loading..." />;
+function LoadingPanel({ text }: { text: CopyText }) {
+  return <CenteredMessage title="OlcRTC Panel" message={text.loadingClients.replace("clients", "...")} />;
 }
 
 function CenteredMessage({ title, message }: { title: string; message: string }) {
   return <main className="auth-shell"><section className="auth-panel"><h1>{title}</h1><p>{message}</p></section></main>;
 }
 
-function clientInputFromForm(data: FormData) {
+function ReloadSummary({ result, text }: { result: ReloadResult; text: CopyText }) {
+  const { summary } = result;
+  return <p className="reload-pill">{text.reloadSummary}: {summary.started} started, {summary.restarted} restarted, {summary.stopped} stopped, {summary.skipped} skipped</p>;
+}
+
+function nodeHealthLabel(snapshot: MetricsSnapshot | undefined, text: CopyText): string {
+  if (!snapshot) {
+    return text.nodeIdle;
+  }
+  if (snapshot.processes.failed > 0) {
+    return text.nodeDegraded;
+  }
+  if (snapshot.processes.running > 0) {
+    return text.nodeHealthy;
+  }
+  return text.nodeIdle;
+}
+
+function subscriptionUnavailableReason(client: Client, locations: Location[], loading: boolean, text: CopyText): string {
+  if (!client.enabled) {
+    return text.subscriptionDisabled;
+  }
+  if (client.expiry_state === "expired") {
+    return text.subscriptionExpired;
+  }
+  if (client.quota_state === "exceeded") {
+    return text.subscriptionQuotaExceeded;
+  }
+  if (!loading && locations.length === 0) {
+    return text.subscriptionNoLocations;
+  }
+  return "";
+}
+
+function clientInputFromForm(data: FormData): ClientInput {
   const expires = String(data.get("expires_at") ?? "").trim();
   return {
     name: String(data.get("name") ?? "").trim(),
@@ -792,20 +1134,14 @@ function clientInputFromForm(data: FormData) {
   };
 }
 
-function locationInputFromForm(data: FormData, provider: Provider, transport: Transport) {
-  let payload: Record<string, unknown> = {};
-  try {
-    payload = JSON.parse(String(data.get("transport_payload") ?? "{}"));
-  } catch {
-    payload = {};
-  }
+function locationInputFromForm(data: FormData, provider: Provider, transport: Transport, payload: Record<string, unknown>): LocationInput {
   return {
     name: String(data.get("name") ?? "").trim(),
     enabled: data.get("enabled") === "on",
     provider,
     transport,
-    room_id: "",
-    crypto_key: "",
+    room_id: String(data.get("room_id") ?? "").trim(),
+    crypto_key: String(data.get("crypto_key") ?? "").trim(),
     transport_payload: payload,
     dns: String(data.get("dns") ?? "").trim(),
     speed_limit_bps: asNumberOrNull(data.get("speed_limit_bps"))
@@ -831,12 +1167,23 @@ function formatDate(value: string): string {
   return date.toLocaleString();
 }
 
-function errorMessage(error: unknown): string {
+function datetimeLocalValue(value: string | null | undefined): string {
+  if (!value) {
+    return "";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toISOString().slice(0, 16);
+}
+
+function errorMessage(error: unknown, text: CopyText): string {
   if (error instanceof ApiError) {
     return error.message;
   }
   if (error instanceof Error) {
     return error.message;
   }
-  return "Unexpected error";
+  return text.unexpectedError;
 }

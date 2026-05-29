@@ -62,3 +62,89 @@ export function asNumberOrNull(value: FormDataEntryValue | null): number | null 
   const number = Number(text);
   return Number.isFinite(number) ? number : null;
 }
+
+export type TransportFormValues = Record<string, string>;
+
+const payloadDefaults: Record<Transport, TransportFormValues> = {
+  datachannel: {},
+  vp8channel: { fps: "60", batch_size: "64" },
+  seichannel: { fps: "60", batch_size: "64", fragment_size: "900", ack_timeout_ms: "2000" },
+  videochannel: {
+    codec: "qrcode",
+    width: "1080",
+    height: "1080",
+    fps: "60",
+    bitrate: "5000k",
+    hw: "none",
+    qr_recovery: "low",
+    qr_size: "0",
+    tile_module: "",
+    tile_rs: ""
+  }
+};
+
+const numericPayloadFields = new Set([
+  "fps",
+  "batch_size",
+  "fragment_size",
+  "ack_timeout_ms",
+  "width",
+  "height",
+  "qr_size",
+  "tile_module",
+  "tile_rs"
+]);
+
+export function transportDefaults(transport: Transport): TransportFormValues {
+  return { ...payloadDefaults[transport] };
+}
+
+export function formFromTransportPayload(transport: Transport, payload: Record<string, unknown>): TransportFormValues {
+  const values = transportDefaults(transport);
+  for (const [key, value] of Object.entries(payload)) {
+    if (key in values && value != null) {
+      values[key] = String(value);
+    }
+  }
+  return values;
+}
+
+export function payloadFromTransportForm(transport: Transport, values: TransportFormValues): Record<string, unknown> {
+  if (transport === "datachannel") {
+    return {};
+  }
+  const payload: Record<string, unknown> = {};
+  for (const key of Object.keys(payloadDefaults[transport])) {
+    const raw = String(values[key] ?? "").trim();
+    if (raw === "" && (key === "tile_module" || key === "tile_rs")) {
+      continue;
+    }
+    if (numericPayloadFields.has(key)) {
+      payload[key] = Number(raw);
+    } else {
+      payload[key] = raw;
+    }
+  }
+  return payload;
+}
+
+export function hasAdvancedTransportPayload(transport: Transport, payload: Record<string, unknown>): boolean {
+  const allowed = new Set(Object.keys(payloadDefaults[transport]));
+  return Object.keys(payload).some((key) => !allowed.has(key));
+}
+
+export function validateAdvancedTransportJson(text: string): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: true, value: {} };
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: false, error: "Transport payload JSON must be a JSON object." };
+    }
+    return { ok: true, value: parsed as Record<string, unknown> };
+  } catch {
+    return { ok: false, error: "Transport payload JSON must be valid JSON." };
+  }
+}
