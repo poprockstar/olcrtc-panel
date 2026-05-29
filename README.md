@@ -66,6 +66,30 @@ Apply database migrations without starting the server:
 ./bin/olcpanel migrate --database-url sqlite:///tmp/olcpanel.db
 ```
 
+Create and restore full SQLite backup archives. API restore only accepts known
+backup records; CLI restore is intended for stopped-service maintenance:
+
+```bash
+./bin/olcpanel backup --database-url sqlite:///tmp/olcpanel.db --output /tmp/olcpanel-backups
+./bin/olcpanel restore --database-url sqlite:///tmp/olcpanel.db --file /tmp/olcpanel-backups/olcpanel-backup-20260529-120000.zip
+```
+
+Export and append-import portable Panel JSON for settings, clients, and nested
+locations. Imported clients receive new IDs and subscription tokens; settings
+are applied only when requested:
+
+```bash
+./bin/olcpanel export --database-url sqlite:///tmp/olcpanel.db --output /tmp/olcpanel-export.json
+./bin/olcpanel import --database-url sqlite:///tmp/olcpanel.db --file /tmp/olcpanel-export.json
+./bin/olcpanel import --database-url sqlite:///tmp/olcpanel.db --file /tmp/olcpanel-export.json --apply-settings
+```
+
+Reset or create an admin account from the CLI:
+
+```bash
+./bin/olcpanel reset-admin --database-url sqlite:///tmp/olcpanel.db --username admin --password 'correct horse battery'
+```
+
 The default database URL is `sqlite:///etc/olcpanel/panel.db`. Override it with
 `OLCPANEL_DATABASE_URL` or the `--database-url` flag. PostgreSQL-style URLs
 (`postgres://` and `postgresql://`) are recognized structurally, but Phase 2

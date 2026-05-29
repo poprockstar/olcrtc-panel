@@ -1,6 +1,8 @@
 import type {
   Client,
   ClientInput,
+  BackupRecord,
+  ImportResult,
   Location,
   LocationInput,
   LogResponse,
@@ -98,5 +100,12 @@ export const api = {
     request<void>(`/api/v1/clients/${clientId}/locations/${locationId}`, { method: "DELETE", csrfToken }),
   logs: (params: URLSearchParams) => request<LogResponse>(`/api/v1/logs?${params.toString()}`),
   logsText: (params: URLSearchParams) => request<string>(`/api/v1/logs?${params.toString()}`, { text: true }),
-  subscription: (token: string) => request<string>(`/sub/${token}`, { text: true })
+  subscription: (token: string) => request<string>(`/sub/${token}`, { text: true }),
+  backups: () => request<BackupRecord[]>("/api/v1/backups"),
+  createBackup: (csrfToken: string) => request<BackupRecord>("/api/v1/backup", { method: "POST", csrfToken }),
+  restoreBackup: (backupId: number, csrfToken: string) =>
+    request<unknown>("/api/v1/restore", { method: "POST", body: { backup_id: backupId }, csrfToken }),
+  exportPanel: () => request<unknown>("/api/v1/export"),
+  importPanel: (doc: unknown, csrfToken: string) =>
+    request<ImportResult>("/api/v1/import", { method: "POST", body: doc, csrfToken })
 };

@@ -118,3 +118,22 @@ export type LogEntry = {
 export type LogResponse = {
   entries: LogEntry[];
 };
+
+export type BackupRecord = {
+  id: number;
+  node_id: string;
+  path: string;
+  status: string;
+  format_version: number;
+  size_bytes: number;
+  checksum_sha256: string;
+  created_at: string;
+  completed_at?: string;
+  error_message: string;
+};
+
+export type ImportResult = {
+  clients_created: number;
+  locations_created: number;
+  settings_applied: boolean;
+};

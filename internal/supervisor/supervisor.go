@@ -220,6 +220,27 @@ func (supervisor *Supervisor) Reload(ctx context.Context) (ReloadResult, error) 
 	return result, nil
 }
 
+func (supervisor *Supervisor) StopAll(ctx context.Context) error {
+	if supervisor == nil {
+		return nil
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	ids := make([]string, 0, len(supervisor.running))
+	for id := range supervisor.running {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		state := supervisor.running[id]
+		if err := supervisor.runner.Stop(ctx, state); err != nil {
+			return fmt.Errorf("stop location %s: %w", state.LocationID, err)
+		}
+		delete(supervisor.running, id)
+	}
+	return nil
+}
+
 func (supervisor *Supervisor) StatusSnapshot() map[string]ProcessStatus {
 	if supervisor == nil {
 		return map[string]ProcessStatus{}

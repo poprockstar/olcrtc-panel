@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,9 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"olcpanel/internal/auth"
+	"olcpanel/internal/backup"
 	"olcpanel/internal/config"
 	"olcpanel/internal/netstack"
 	"olcpanel/internal/observability"
@@ -41,11 +45,208 @@ func run(args []string) error {
 		return migrate(args[1:])
 	case "doctor":
 		return doctor(args[1:])
+	case "backup":
+		return backupCommand(args[1:])
+	case "restore":
+		return restoreCommand(args[1:])
+	case "export":
+		return exportCommand(args[1:])
+	case "import":
+		return importCommand(args[1:])
+	case "reset-admin":
+		return resetAdmin(args[1:])
 	case "-h", "--help", "help":
 		return usage()
 	default:
 		return fmt.Errorf("unknown command %q\n\n%s", args[0], commandUsage())
 	}
+}
+
+func backupCommand(args []string) error {
+	flags := flag.NewFlagSet("backup", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databaseURL := flags.String("database-url", "", "database URL")
+	_ = flags.String("runtime-dir", "", "runtime directory for generated OlcRTC configs")
+	output := flags.String("output", "", "backup file or directory")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	cfg, err := config.LoadWithOptions(config.LoadOptions{DatabaseURL: *databaseURL})
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	db, err := storage.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := storage.Migrate(ctx, db); err != nil {
+		return err
+	}
+	outputPath := *output
+	if outputPath == "" {
+		settings, err := storage.GetSettings(ctx, db)
+		if err != nil {
+			return err
+		}
+		outputPath = settings.BackupPath
+	}
+	record, err := backup.Create(ctx, db, backup.CreateOptions{DatabaseURL: cfg.DatabaseURL, OutputPath: outputPath})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stdout, record.Path)
+	return nil
+}
+
+func restoreCommand(args []string) error {
+	flags := flag.NewFlagSet("restore", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databaseURL := flags.String("database-url", "", "database URL")
+	file := flags.String("file", "", "backup archive path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*file) == "" {
+		return errors.New("--file is required")
+	}
+	cfg, err := config.LoadWithOptions(config.LoadOptions{DatabaseURL: *databaseURL})
+	if err != nil {
+		return err
+	}
+	return backup.RestoreFile(context.Background(), cfg.DatabaseURL, *file)
+}
+
+func exportCommand(args []string) error {
+	flags := flag.NewFlagSet("export", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databaseURL := flags.String("database-url", "", "database URL")
+	output := flags.String("output", "", "output JSON path")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*output) == "" {
+		return errors.New("--output is required")
+	}
+	cfg, err := config.LoadWithOptions(config.LoadOptions{DatabaseURL: *databaseURL})
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	db, err := storage.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := storage.Migrate(ctx, db); err != nil {
+		return err
+	}
+	doc, err := backup.ExportPanel(ctx, db)
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(*output, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("create export file: %w", err)
+	}
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(doc); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("write export file: %w", err)
+	}
+	return file.Close()
+}
+
+func importCommand(args []string) error {
+	flags := flag.NewFlagSet("import", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databaseURL := flags.String("database-url", "", "database URL")
+	filePath := flags.String("file", "", "Panel JSON path")
+	applySettings := flags.Bool("apply-settings", false, "apply settings from Panel JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*filePath) == "" {
+		return errors.New("--file is required")
+	}
+	cfg, err := config.LoadWithOptions(config.LoadOptions{DatabaseURL: *databaseURL})
+	if err != nil {
+		return err
+	}
+	file, err := os.Open(*filePath)
+	if err != nil {
+		return fmt.Errorf("open import file: %w", err)
+	}
+	defer file.Close()
+	var doc backup.PanelJSON
+	if err := json.NewDecoder(file).Decode(&doc); err != nil {
+		return fmt.Errorf("decode import file: %w", err)
+	}
+	ctx := context.Background()
+	db, err := storage.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := storage.Migrate(ctx, db); err != nil {
+		return err
+	}
+	result, err := backup.ImportPanel(ctx, db, doc, backup.ImportOptions{ApplySettings: *applySettings})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "imported %d clients and %d locations\n", result.ClientsCreated, result.LocationsCreated)
+	return nil
+}
+
+func resetAdmin(args []string) error {
+	flags := flag.NewFlagSet("reset-admin", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	databaseURL := flags.String("database-url", "", "database URL")
+	username := flags.String("username", "", "admin username")
+	password := flags.String("password", "", "admin password")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
+	}
+	if strings.TrimSpace(*username) == "" || *password == "" {
+		return errors.New("--username and --password are required")
+	}
+	cfg, err := config.LoadWithOptions(config.LoadOptions{DatabaseURL: *databaseURL})
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	db, err := storage.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	if err := storage.Migrate(ctx, db); err != nil {
+		return err
+	}
+	user, err := auth.ResetAdmin(ctx, db, *username, *password)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "admin %s reset\n", user.Username)
+	return nil
 }
 
 func serve(args []string) error {
@@ -349,6 +550,11 @@ Usage:
   olcpanel serve [--bind 127.0.0.1:8888] [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--olcrtc-binary olcrtc] [--network-cidr 10.255.0.0/16] [--traffic-sample-interval 30s] [--log-path /var/log/olcpanel/panel.log]
   olcpanel migrate [--database-url sqlite:///etc/olcpanel/panel.db]
   olcpanel doctor [--database-url sqlite:///etc/olcpanel/panel.db] [--network-cidr 10.255.0.0/16]
+  olcpanel backup [--database-url sqlite:///etc/olcpanel/panel.db] [--runtime-dir /var/lib/olcpanel/runtime] [--output PATH]
+  olcpanel restore --file PATH [--database-url sqlite:///etc/olcpanel/panel.db]
+  olcpanel export --output PATH [--database-url sqlite:///etc/olcpanel/panel.db]
+  olcpanel import --file PATH [--database-url sqlite:///etc/olcpanel/panel.db] [--apply-settings]
+  olcpanel reset-admin --username USER --password PASS [--database-url sqlite:///etc/olcpanel/panel.db]
 
 Environment:
   OLCPANEL_BIND           HTTP bind address. Defaults to 127.0.0.1:8888.

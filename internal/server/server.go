@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"olcpanel/internal/auth"
+	"olcpanel/internal/backup"
 	"olcpanel/internal/clients"
 	"olcpanel/internal/config"
 	"olcpanel/internal/metrics"
@@ -103,9 +104,101 @@ func New(cfg config.Config, assets fs.FS, options ...Option) http.Handler {
 	registerSubscriptionRoutes(mux, deps)
 	registerAPIKeyRoutes(mux, deps)
 	registerObservabilityRoutes(mux, deps)
+	registerBackupRoutes(mux, cfg, deps)
 	registerStaticRoutes(mux, assets)
 
 	return mux
+}
+
+type restoreRuntime interface {
+	StopAll(context.Context) error
+	Reload(context.Context) (supervisor.ReloadResult, error)
+}
+
+func registerBackupRoutes(mux *http.ServeMux, cfg config.Config, deps dependencies) {
+	mux.HandleFunc("GET /api/v1/backups", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, false); !ok {
+			return
+		}
+		records, err := backup.List(r.Context(), deps.db)
+		if err != nil {
+			http.Error(w, "failed to list backups", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, records)
+	})
+
+	mux.HandleFunc("POST /api/v1/backup", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		settings, err := storage.GetSettings(r.Context(), deps.db)
+		if err != nil {
+			http.Error(w, "failed to read settings", http.StatusInternalServerError)
+			return
+		}
+		record, err := backup.Create(r.Context(), deps.db, backup.CreateOptions{
+			DatabaseURL: cfg.DatabaseURL,
+			OutputPath:  settings.BackupPath,
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, record)
+	})
+
+	mux.HandleFunc("POST /api/v1/restore", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		runtime, ok := deps.supervisor.(restoreRuntime)
+		if !ok {
+			http.Error(w, "restore runtime is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		var payload restoreRequest
+		if !decodeJSON(w, r, &payload) {
+			return
+		}
+		result, err := backup.RestoreKnown(r.Context(), deps.db, payload.BackupID, runtime)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, result)
+	})
+
+	mux.HandleFunc("GET /api/v1/export", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, false); !ok {
+			return
+		}
+		doc, err := backup.ExportPanel(r.Context(), deps.db)
+		if err != nil {
+			http.Error(w, "failed to export panel JSON", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Disposition", `attachment; filename="`+backup.DefaultExportFilename()+`"`)
+		writeJSON(w, doc)
+	})
+
+	mux.HandleFunc("POST /api/v1/import", func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := deps.requireAdmin(w, r, true); !ok {
+			return
+		}
+		var doc backup.PanelJSON
+		if !decodeJSON(w, r, &doc) {
+			return
+		}
+		result, err := backup.ImportPanel(r.Context(), deps.db, doc, backup.ImportOptions{
+			ApplySettings: r.URL.Query().Get("apply_settings") == "true",
+		})
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, result)
+	})
 }
 
 func registerReloadRoutes(mux *http.ServeMux, deps dependencies) {
@@ -745,6 +838,10 @@ type locationRequest struct {
 type rotateRequest struct {
 	RotateRooms             bool `json:"rotate_rooms"`
 	RotateSubscriptionToken bool `json:"rotate_subscription_token"`
+}
+
+type restoreRequest struct {
+	BackupID int64 `json:"backup_id"`
 }
 
 type requestAuth struct {

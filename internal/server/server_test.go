@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"olcpanel/internal/auth"
+	"olcpanel/internal/backup"
 	"olcpanel/internal/clients"
 	"olcpanel/internal/config"
 	"olcpanel/internal/metrics"
@@ -346,6 +348,128 @@ func TestAPIKeyCanCallReloadWithoutCSRF(t *testing.T) {
 	}
 	if body.Summary.Started != 1 || len(body.Actions) != 1 || body.Actions[0].Action != supervisor.ActionStarted || body.Actions[0].Reason != supervisor.ReasonNew {
 		t.Fatalf("reload response = %#v, want injected result", body)
+	}
+}
+
+func TestBackupRoutesCreateListExportImportAndProtectMutationsWithCSRF(t *testing.T) {
+	db, databaseURL := testDBWithURL(t)
+	backupDir := t.TempDir()
+	if err := storage.PutSettings(context.Background(), db, storage.Settings{
+		UILocale:                    "en",
+		PublicClientEndpointEnabled: false,
+		BackupPath:                  backupDir,
+		QuotaLockMode:               "stop",
+	}); err != nil {
+		t.Fatalf("PutSettings returned error: %v", err)
+	}
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888", DatabaseURL: databaseURL}, testAssets(), server.WithDatabase(db), server.WithSupervisor(&fakeRestoreSupervisor{}))
+	cookies, csrf := loginSession(t, handler)
+
+	withoutCSRF := httptest.NewRequest(http.MethodPost, "/api/v1/backup", nil)
+	for _, cookie := range cookies {
+		withoutCSRF.AddCookie(cookie)
+	}
+	withoutRec := httptest.NewRecorder()
+	handler.ServeHTTP(withoutRec, withoutCSRF)
+	if withoutRec.Code != http.StatusForbidden {
+		t.Fatalf("backup without csrf status = %d, want %d", withoutRec.Code, http.StatusForbidden)
+	}
+
+	createReq := httptest.NewRequest(http.MethodPost, "/api/v1/backup", nil)
+	createReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		createReq.AddCookie(cookie)
+	}
+	createRec := httptest.NewRecorder()
+	handler.ServeHTTP(createRec, createReq)
+	if createRec.Code != http.StatusOK {
+		t.Fatalf("backup create status = %d, want %d, body: %s", createRec.Code, http.StatusOK, createRec.Body.String())
+	}
+	var created backup.Record
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("backup create response is not JSON: %v", err)
+	}
+	if created.ID == 0 || created.Status != "completed" {
+		t.Fatalf("created backup = %#v, want completed record", created)
+	}
+	if _, err := os.Stat(created.Path); err != nil {
+		t.Fatalf("created backup file missing: %v", err)
+	}
+
+	listReq := httptest.NewRequest(http.MethodGet, "/api/v1/backups", nil)
+	for _, cookie := range cookies {
+		listReq.AddCookie(cookie)
+	}
+	listRec := httptest.NewRecorder()
+	handler.ServeHTTP(listRec, listReq)
+	if listRec.Code != http.StatusOK {
+		t.Fatalf("backup list status = %d, want %d, body: %s", listRec.Code, http.StatusOK, listRec.Body.String())
+	}
+	var list []backup.Record
+	if err := json.Unmarshal(listRec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("backup list response is not JSON: %v", err)
+	}
+	if len(list) != 1 || list[0].ID != created.ID {
+		t.Fatalf("backup list = %#v, want created record", list)
+	}
+
+	exportReq := httptest.NewRequest(http.MethodGet, "/api/v1/export", nil)
+	for _, cookie := range cookies {
+		exportReq.AddCookie(cookie)
+	}
+	exportRec := httptest.NewRecorder()
+	handler.ServeHTTP(exportRec, exportReq)
+	if exportRec.Code != http.StatusOK {
+		t.Fatalf("export status = %d, want %d, body: %s", exportRec.Code, http.StatusOK, exportRec.Body.String())
+	}
+	if got := exportRec.Header().Get("Content-Disposition"); !strings.Contains(got, "olcpanel-export.json") {
+		t.Fatalf("Content-Disposition = %q, want export filename", got)
+	}
+
+	importReq := httptest.NewRequest(http.MethodPost, "/api/v1/import", bytes.NewReader(exportRec.Body.Bytes()))
+	importReq.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		importReq.AddCookie(cookie)
+	}
+	importRec := httptest.NewRecorder()
+	handler.ServeHTTP(importRec, importReq)
+	if importRec.Code != http.StatusOK {
+		t.Fatalf("import status = %d, want %d, body: %s", importRec.Code, http.StatusOK, importRec.Body.String())
+	}
+}
+
+func TestRestoreRouteRestoresKnownBackupAndStopsRuntimeBeforeReload(t *testing.T) {
+	db, databaseURL := testDBWithURL(t)
+	handler := server.New(config.Config{BindAddress: "127.0.0.1:8888", DatabaseURL: databaseURL}, testAssets(), server.WithDatabase(db), server.WithSupervisor(&fakeRestoreSupervisor{}))
+	cookies, csrf := loginSession(t, handler)
+	originalID := createClientViaSession(t, handler, cookies, csrf, `{"name":"Original"}`)
+	record, err := backup.Create(context.Background(), db, backup.CreateOptions{DatabaseURL: databaseURL, OutputPath: t.TempDir()})
+	if err != nil {
+		t.Fatalf("backup Create returned error: %v", err)
+	}
+	_ = createClientViaSession(t, handler, cookies, csrf, `{"name":"Later"}`)
+
+	runtime := &fakeRestoreSupervisor{}
+	handler = server.New(config.Config{BindAddress: "127.0.0.1:8888", DatabaseURL: databaseURL}, testAssets(), server.WithDatabase(db), server.WithSupervisor(runtime))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/restore", bytes.NewBufferString(`{"backup_id":`+strconv.FormatInt(record.ID, 10)+`}`))
+	req.Header.Set("X-CSRF-Token", csrf)
+	for _, cookie := range cookies {
+		req.AddCookie(cookie)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore status = %d, want %d, body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if runtime.stopCalls != 1 || runtime.calls != 1 || runtime.order != "stop,reload" {
+		t.Fatalf("runtime stop=%d reload=%d order=%q, want stop then reload", runtime.stopCalls, runtime.calls, runtime.order)
+	}
+	restored, err := clients.ListClients(context.Background(), db)
+	if err != nil {
+		t.Fatalf("ListClients returned error: %v", err)
+	}
+	if len(restored) != 1 || restored[0].ID != originalID {
+		t.Fatalf("clients after restore = %#v, want only original %s", restored, originalID)
 	}
 }
 
@@ -1188,6 +1312,31 @@ func (supervisor *fakeRuntimeSupervisor) StatusSnapshot() map[string]supervisor.
 	return supervisor.statuses
 }
 
+type fakeRestoreSupervisor struct {
+	fakeReloader
+	stopCalls int
+	order     string
+}
+
+func (fake *fakeRestoreSupervisor) Reload(context.Context) (supervisor.ReloadResult, error) {
+	fake.calls++
+	fake.order = appendCall(fake.order, "reload")
+	return fake.result, fake.err
+}
+
+func (fake *fakeRestoreSupervisor) StopAll(context.Context) error {
+	fake.stopCalls++
+	fake.order = appendCall(fake.order, "stop")
+	return nil
+}
+
+func appendCall(current, next string) string {
+	if current == "" {
+		return next
+	}
+	return current + "," + next
+}
+
 type fakeLogStore struct {
 	entries []observability.LogEntry
 	err     error
@@ -1317,7 +1466,14 @@ func testAssets() fs.FS {
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := storage.Open(context.Background(), "sqlite:///"+filepath.ToSlash(filepath.Join(t.TempDir(), "panel.db")))
+	db, _ := testDBWithURL(t)
+	return db
+}
+
+func testDBWithURL(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	databaseURL := "sqlite:///" + filepath.ToSlash(filepath.Join(t.TempDir(), "panel.db"))
+	db, err := storage.Open(context.Background(), databaseURL)
 	if err != nil {
 		t.Fatalf("Open returned error: %v", err)
 	}
@@ -1325,5 +1481,5 @@ func testDB(t *testing.T) *sql.DB {
 	if err := storage.Migrate(context.Background(), db); err != nil {
 		t.Fatalf("Migrate returned error: %v", err)
 	}
-	return db
+	return db, databaseURL
 }

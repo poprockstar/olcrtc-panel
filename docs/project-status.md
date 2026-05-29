@@ -1,6 +1,6 @@
 # OlcRTC Panel Project Status
 
-Last updated: 2026-05-28
+Last updated: 2026-05-29
 
 ## Architecture Approval
 
@@ -13,7 +13,7 @@ Last updated: 2026-05-28
 
 ## Phase State
 
-- Current phase: Phase 11 - Frontend Operational UI complete; Phase 12 - Backups And Restore is next.
+- Current phase: Phase 12 - Backup, Restore, Import, Export complete; Phase 13 - Installer, Updater, Systemd, Docker is next.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -27,7 +27,8 @@ Last updated: 2026-05-28
   - Phase 9 - Traffic Accounting, Quotas, And Expiry
   - Phase 10 - Logs, Metrics, And Runtime Status API
   - Phase 11 - Frontend Operational UI
-- Next session target: start Phase 12 backups and restore implementation.
+  - Phase 12 - Backup, Restore, Import, Export
+- Next session target: start Phase 13 installer, updater, systemd, and deployment packaging.
 
 ## Implemented Capabilities
 
@@ -152,8 +153,23 @@ Last updated: 2026-05-28
 - Subscription panel builds private `/sub/{subscription_token}` URLs, fetches plaintext subscriptions, extracts `olcrtc://` lines, provides copy actions, and renders QR codes for the private URL and selected URI.
 - Logs view consumes `GET /api/v1/logs` with level/source/client/location/search/limit filters, JSON display, and plaintext download via `format=text`.
 - Settings view loads and saves the complete settings object for `ui_locale`, `public_client_endpoint_enabled`, `backup_path`, and `quota_lock_mode`.
-- Backups view is read-only Phase 12 readiness and displays the configured backup path without exposing unavailable backup/restore actions.
-- Embedded frontend assets in `internal/webui/dist/` were rebuilt after the Phase 11 UI build.
+- Schema migration version 7 extends backup records with archive format version, size, checksum, completion time, and error metadata while preserving existing rows.
+- `internal/backup` added for `olcpanel-backup-v1` ZIP archive creation and validation. Each archive contains `manifest.json` and `panel.db`; the manifest records format version, creation time, schema version, app name, and database size/checksum.
+- Backup records are persisted in SQLite, and authenticated `GET /api/v1/backups` lists known local-node backup records.
+- Authenticated `POST /api/v1/backup` creates a validated SQLite backup archive in the configured `backup_path`; browser sessions require CSRF and API-key requests follow existing admin auth behavior.
+- Authenticated `POST /api/v1/restore` restores only a known completed backup record by validating the archive, stopping all managed runtime processes, replacing managed SQLite state transactionally, rerunning migrations, and reloading the supervisor.
+- Supervisor now exposes `StopAll(ctx)` so restore can pause runtime processes before state replacement.
+- Authenticated `GET /api/v1/export` returns normalized Panel JSON for settings, clients, and nested locations.
+- Authenticated `POST /api/v1/import` imports Panel JSON append-only by default, creating fresh client IDs and subscription tokens while preserving exported room IDs and crypto keys for locations.
+- Panel JSON import validates provider/transport combinations, transport payloads, DNS, speed limits, and settings when settings import is explicitly requested.
+- CLI commands added:
+  - `olcpanel backup [--database-url] [--runtime-dir] [--output PATH]`
+  - `olcpanel restore --file PATH [--database-url]`
+  - `olcpanel export --output PATH [--database-url]`
+  - `olcpanel import --file PATH [--database-url] [--apply-settings]`
+  - `olcpanel reset-admin --username USER --password PASS [--database-url]`
+- Frontend Backups view now lists real backup records, shows the configured backup path, creates backups, restores selected completed backups with confirmation, exports Panel JSON, and imports Panel JSON with success/error state.
+- Embedded frontend assets in `internal/webui/dist/` were rebuilt after the Phase 12 UI build.
 
 ## Phase 0 Architecture Review Notes
 
@@ -277,6 +293,16 @@ Last updated: 2026-05-28
 - Subscription status: private token URLs remain the default; public `/c/{client_id}` is only shown when `public_client_endpoint_enabled` is enabled.
 - Backup status: backup and restore actions remain deferred to Phase 12 and are not shown as disabled fake controls.
 
+## Phase 12 Completion Notes
+
+- Backup format status: `olcpanel-backup-v1` ZIP archives contain `manifest.json` plus `panel.db`; manifest validation checks archive format version, database size, and SHA-256 checksum before restore.
+- Backup record status: the `backups` table now stores format version, size, checksum, completed time, and error metadata for completed archives.
+- API backup status: `/api/v1/backups`, `/api/v1/backup`, `/api/v1/restore`, `/api/v1/export`, and `/api/v1/import` are admin-only; browser mutations require CSRF and API-key auth bypasses CSRF consistently with other admin routes.
+- Restore status: API restore is intentionally limited to known completed backup records, stops managed runtime, replaces SQLite state transactionally from the validated snapshot, reruns migrations, and reloads supervisor so runtime configs are regenerated from database state.
+- CLI status: backup, restore, export, import, and reset-admin commands are available for stopped-service maintenance and migration workflows.
+- Panel JSON status: export includes settings, clients, and nested locations; import is append-only by default, creates new client identities/tokens, preserves location room IDs and crypto keys, and applies settings only when explicitly requested.
+- Frontend status: the Backups screen now provides real backup creation, backup list, restore confirmation, Panel JSON export, and Panel JSON import controls.
+
 ## Review Hardening Fixes Notes
 
 - No new roadmap features were pulled forward.
@@ -382,6 +408,12 @@ Last updated: 2026-05-28
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
   - Vite dev server HTTP smoke at `http://127.0.0.1:5173/` returned HTTP 200 with the OlcRTC Panel shell.
   - Full browser interaction QA was not run because the Browser Node REPL tool was not exposed in this session and Playwright is not installed/configured in the project.
+- Phase 12:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run test` passed with 10 Vitest/Testing Library tests.
+  - `npm --prefix frontend run build` passed and rebuilt embedded assets.
+  - `go build -o bin\olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 ./cmd/olcpanel` passed after rerunning outside the Windows sandbox when the sandbox failed to spawn the cross-build process.
 
 ## Open Risks And Blockers
 

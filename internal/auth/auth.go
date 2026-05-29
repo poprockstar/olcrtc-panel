@@ -151,6 +151,57 @@ VALUES (?, ?, 'admin', CURRENT_TIMESTAMP)`, username, string(hash))
 	return User{ID: id, Username: username, Role: "admin"}, nil
 }
 
+func ResetAdmin(ctx context.Context, db *sql.DB, username, password string) (User, error) {
+	username = strings.TrimSpace(username)
+	if err := validateCredentials(username, password); err != nil {
+		return User{}, err
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		return User{}, fmt.Errorf("hash password: %w", err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return User{}, fmt.Errorf("begin reset admin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `
+UPDATE users
+SET password_hash = ?, role = 'admin', updated_at = CURRENT_TIMESTAMP
+WHERE username = ?`, string(hash), username)
+	if err != nil {
+		return User{}, fmt.Errorf("update admin: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return User{}, fmt.Errorf("read updated admin count: %w", err)
+	}
+	if affected == 0 {
+		result, err = tx.ExecContext(ctx, `
+INSERT INTO users(username, password_hash, role, updated_at)
+VALUES (?, ?, 'admin', CURRENT_TIMESTAMP)`, username, string(hash))
+		if err != nil {
+			return User{}, fmt.Errorf("insert admin: %w", err)
+		}
+		id, err := result.LastInsertId()
+		if err != nil {
+			return User{}, fmt.Errorf("read admin id: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return User{}, fmt.Errorf("commit reset admin transaction: %w", err)
+		}
+		return User{ID: id, Username: username, Role: "admin"}, nil
+	}
+	var user User
+	if err := tx.QueryRowContext(ctx, `SELECT id, username, role FROM users WHERE username = ?`, username).Scan(&user.ID, &user.Username, &user.Role); err != nil {
+		return User{}, fmt.Errorf("read admin: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return User{}, fmt.Errorf("commit reset admin transaction: %w", err)
+	}
+	return user, nil
+}
+
 func VerifyLogin(ctx context.Context, db *sql.DB, username, password string) (User, error) {
 	username = strings.TrimSpace(username)
 	var user User

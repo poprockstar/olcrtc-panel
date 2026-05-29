@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   Clipboard,
   Copy,
+  Download,
   FileText,
   LogOut,
   RefreshCw,
@@ -15,6 +16,7 @@ import {
   Server,
   Settings as SettingsIcon,
   Smartphone,
+  Upload,
   Users,
   XCircle
 } from "lucide-react";
@@ -32,7 +34,7 @@ import {
 } from "./domain";
 import { browserLocale, copy } from "./i18n";
 import { clearStoredSession, loadStoredSession, saveStoredSession } from "./session";
-import type { Client, Location, Locale, MetricsSnapshot, Provider, Settings, Transport } from "./types";
+import type { BackupRecord, Client, Location, Locale, MetricsSnapshot, Provider, Settings, Transport } from "./types";
 
 type Screen = "dashboard" | "clients" | "logs" | "settings" | "backups";
 
@@ -225,7 +227,7 @@ function AdminShell({
         {screen === "clients" && <ClientsView csrfToken={session.csrfToken} settings={settings} />}
         {screen === "logs" && <LogsView />}
         {screen === "settings" && settings && <SettingsView csrfToken={session.csrfToken} settings={settings} />}
-        {screen === "backups" && <BackupsView settings={settings} />}
+        {screen === "backups" && <BackupsView csrfToken={session.csrfToken} settings={settings} />}
       </section>
     </main>
   );
@@ -626,14 +628,140 @@ function SettingsView({ csrfToken, settings }: { csrfToken: string; settings: Se
   );
 }
 
-function BackupsView({ settings }: { settings?: Settings }) {
+function BackupsView({ csrfToken, settings }: { csrfToken: string; settings?: Settings }) {
+  const queryClient = useQueryClient();
+  const backups = useQuery({ queryKey: ["backups"], queryFn: api.backups });
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const create = useMutation({
+    mutationFn: () => api.createBackup(csrfToken),
+    onSuccess: () => {
+      setMessage("Backup created.");
+      setError("");
+      void queryClient.invalidateQueries({ queryKey: ["backups"] });
+    },
+    onError: (err) => {
+      setMessage("");
+      setError(errorMessage(err));
+    }
+  });
+  const restore = useMutation({
+    mutationFn: (id: number) => api.restoreBackup(id, csrfToken),
+    onSuccess: () => {
+      setMessage("Backup restored.");
+      setError("");
+      void queryClient.invalidateQueries({ queryKey: ["backups"] });
+      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+      void queryClient.invalidateQueries({ queryKey: ["clients"] });
+    },
+    onError: (err) => {
+      setMessage("");
+      setError(errorMessage(err));
+    }
+  });
+  const importMutation = useMutation({
+    mutationFn: (doc: unknown) => api.importPanel(doc, csrfToken),
+    onSuccess: (result) => {
+      setMessage(`Imported ${result.clients_created} clients and ${result.locations_created} locations.`);
+      setError("");
+      void queryClient.invalidateQueries({ queryKey: ["clients"] });
+      void queryClient.invalidateQueries({ queryKey: ["metrics"] });
+    },
+    onError: (err) => {
+      setMessage("");
+      setError(errorMessage(err));
+    }
+  });
+
+  const restoreBackup = (record: BackupRecord) => {
+    if (window.confirm(`Restore backup ${record.id}? This replaces the current database state.`)) {
+      restore.mutate(record.id);
+    }
+  };
+  const exportPanel = async () => {
+    try {
+      const doc = await api.exportPanel();
+      const blob = new Blob([JSON.stringify(doc, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "olcpanel-export.json";
+      link.click();
+      URL.revokeObjectURL(url);
+      setMessage("Panel JSON exported.");
+      setError("");
+    } catch (err) {
+      setMessage("");
+      setError(errorMessage(err));
+    }
+  };
+  const importPanel = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    if (!file) {
+      return;
+    }
+    try {
+      importMutation.mutate(JSON.parse(await file.text()));
+    } catch {
+      setMessage("");
+      setError("Import file must be valid JSON.");
+    } finally {
+      event.currentTarget.value = "";
+    }
+  };
+
   return (
-    <section className="panel">
-      <h2>Backups readiness</h2>
+    <section className="panel-wide">
+      <div className="detail-header">
+        <h2>Backups</h2>
+        <div className="button-row">
+          <button className="secondary-action" type="button" onClick={() => create.mutate()} disabled={create.isPending}>
+            <Archive aria-hidden="true" />
+            Create backup
+          </button>
+          <button className="secondary-action" type="button" onClick={() => void exportPanel()}>
+            <Download aria-hidden="true" />
+            Export JSON
+          </button>
+          <label className="secondary-action file-action">
+            <Upload aria-hidden="true" />
+            Import JSON
+            <input type="file" accept="application/json,.json" onChange={(event) => void importPanel(event)} />
+          </label>
+        </div>
+      </div>
       <dl className="kv-grid">
         <div><dt>Configured backup path</dt><dd>{settings?.backup_path ?? "Loading..."}</dd></div>
-        <div><dt>Phase 12 status</dt><dd>Backup and restore actions are not available in this phase.</dd></div>
       </dl>
+      {message && <p className="success-line">{message}</p>}
+      {error && <p className="error-line">{error}</p>}
+      {backups.error && <p className="error-line">{errorMessage(backups.error)}</p>}
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr><th>ID</th><th>File</th><th>Status</th><th>Size</th><th>Created</th><th>Action</th></tr>
+          </thead>
+          <tbody>
+            {backups.isLoading && <tr><td colSpan={6}>Loading backups...</td></tr>}
+            {backups.data?.length === 0 && <tr><td colSpan={6}>No backups yet.</td></tr>}
+            {backups.data?.map((record) => (
+              <tr key={record.id}>
+                <td>{record.id}</td>
+                <td>{baseName(record.path)}</td>
+                <td><StatusBadge tone={record.status === "completed" ? "good" : record.status === "error" ? "bad" : "muted"}>{record.status}</StatusBadge></td>
+                <td>{formatBytes(record.size_bytes)}</td>
+                <td>{formatDate(record.created_at)}</td>
+                <td>
+                  <button className="secondary-action" type="button" onClick={() => restoreBackup(record)} disabled={restore.isPending || record.status !== "completed"} aria-label={`Restore backup ${record.id}`}>
+                    <RefreshCw aria-hidden="true" />
+                    Restore
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </section>
   );
 }
@@ -689,6 +817,18 @@ function hostRatio(used: number | null, total: number | null): string {
     return "n/a";
   }
   return `${Math.round((used / total) * 100)}%`;
+}
+
+function baseName(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
+}
+
+function formatDate(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString();
 }
 
 function errorMessage(error: unknown): string {

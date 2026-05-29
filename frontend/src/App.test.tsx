@@ -199,6 +199,48 @@ describe("settings and subscriptions", () => {
   });
 });
 
+describe("backups", () => {
+  test("renders backup list and creates backups with CSRF", async () => {
+    const user = userEvent.setup();
+    const { calls } = renderAuthenticated([
+      { url: "/api/v1/metrics", body: metricsFixture() },
+      { url: "/api/v1/backups", body: [backupFixture({ id: 7, status: "completed" })] },
+      { url: "/api/v1/backup", method: "POST", body: backupFixture({ id: 8, status: "completed" }) },
+      { url: "/api/v1/backups", body: [backupFixture({ id: 8, status: "completed" })] }
+    ]);
+
+    await user.click(await screen.findByRole("button", { name: /backups/i }));
+    expect(await screen.findByText("/var/lib/olcpanel/backups")).toBeInTheDocument();
+    expect(await screen.findByText(/backup-7.zip/i)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /create backup/i }));
+    expect(await screen.findByText(/backup-8.zip/i)).toBeInTheDocument();
+    const create = calls.find((call) => call.url === "/api/v1/backup" && call.init?.method === "POST");
+    expect(create?.init?.headers).toMatchObject({ "X-CSRF-Token": "csrf-token" });
+  });
+
+  test("restores selected backups only after confirmation", async () => {
+    const user = userEvent.setup();
+    vi.stubGlobal("confirm", vi.fn(() => true));
+    const { calls } = renderAuthenticated([
+      { url: "/api/v1/metrics", body: metricsFixture() },
+      { url: "/api/v1/backups", body: [backupFixture({ id: 12, status: "completed" })] },
+      { url: "/api/v1/restore", method: "POST", body: { restored: true } },
+      { url: "/api/v1/backups", body: [backupFixture({ id: 12, status: "completed" })] },
+      { url: "/api/v1/metrics", body: metricsFixture() },
+      { url: "/api/v1/clients", body: [] }
+    ]);
+
+    await user.click(await screen.findByRole("button", { name: /backups/i }));
+    await user.click(await screen.findByRole("button", { name: /restore backup 12/i }));
+
+    const restore = calls.find((call) => call.url === "/api/v1/restore" && call.init?.method === "POST");
+    expect(confirm).toHaveBeenCalled();
+    expect(restore?.init?.headers).toMatchObject({ "X-CSRF-Token": "csrf-token" });
+    expect(JSON.parse(String(restore?.init?.body))).toEqual({ backup_id: 12 });
+  });
+});
+
 function renderAuthenticated(extraResponses: MockResponse[]) {
   sessionStorage.setItem("olcpanel.session", JSON.stringify({ username: "admin", csrfToken: "csrf-token" }));
   return renderApp([
@@ -237,5 +279,22 @@ function metricsFixture() {
     traffic: { total_bytes: 0, rx_bytes: 0, tx_bytes: 0 },
     quotas: { warning: 0, exceeded: 0 },
     per_client: []
+  };
+}
+
+function backupFixture(overrides: Record<string, unknown> = {}) {
+  const id = Number(overrides.id ?? 1);
+  return {
+    id,
+    node_id: "local",
+    path: `/var/lib/olcpanel/backups/backup-${id}.zip`,
+    status: "completed",
+    format_version: 1,
+    size_bytes: 4096,
+    checksum_sha256: "abc123",
+    created_at: "2026-05-29T00:00:00Z",
+    completed_at: "2026-05-29T00:00:01Z",
+    error_message: "",
+    ...overrides
   };
 }

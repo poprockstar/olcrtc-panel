@@ -277,6 +277,11 @@ textarea {
   font-weight: 700;
 }
 
+.success-line {
+  color: #276a3c;
+  font-weight: 700;
+}
+
 .screen-grid {
   display: grid;
   gap: 16px;
@@ -361,6 +366,26 @@ textarea {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.file-action {
+  display: inline-flex;
+  cursor: pointer;
+}
+
+.file-action input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .kv-grid {
@@ -536,7 +561,8 @@ pre {
 
   .topbar,
   .detail-header,
-  .copy-row {
+  .copy-row,
+  .button-row {
     align-items: stretch;
     flex-direction: column;
   }
