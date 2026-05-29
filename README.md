@@ -8,9 +8,11 @@
 
 ## Статус
 
-Проект готовится к первому release candidate. Основной сценарий установки -
-Debian/Ubuntu amd64 с `systemd`. Docker оставлен как дополнительный вариант для
+Основной сценарий установки - Debian/Ubuntu amd64 с `systemd`. Docker оставлен как дополнительный вариант для
 опытных пользователей.
+
+Установщик рассчитан на чистый VPS: он ставит системные зависимости, собирает и
+устанавливает `olcrtc`, настраивает панель и запускает systemd-сервис.
 
 ## Быстрая установка
 
@@ -24,6 +26,25 @@ bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/maste
 
 - порт панели, по умолчанию `8888`;
 - необязательный путь, например `/panel`.
+
+Также скрипт установит Debian/Ubuntu-пакеты `ca-certificates`, `curl`, `tar`,
+`git`, `podman`, `iproute2`, `iptables` и `procps`, клонирует
+`https://github.com/openlibrecommunity/olcrtc`, соберет бинарник `olcrtc` через
+Podman и положит его в `/usr/local/bin/olcrtc`.
+
+Если на сервере меньше 4 ГБ RAM+swap, установщик создаст `/swapfile` на 4 ГБ,
+включит его и добавит в `/etc/fstab`. Чтобы отключить это поведение:
+
+```bash
+OLCPANEL_SKIP_SWAP=1 bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/install.sh)
+```
+
+По умолчанию `olcrtc` берется из ветки `master`. Можно закрепить ветку, тег или
+commit:
+
+```bash
+OLCRTC_REF=master bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/install.sh)
+```
 
 После установки скрипт покажет адрес панели:
 
@@ -44,14 +65,26 @@ bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/maste
 
 Скрипт сохраняет текущие настройки, базу данных, runtime-конфиги, логи и
 резервные копии. Перед заменой бинарника он делает копию
-`/usr/local/bin/olcpanel.bak`.
+`/usr/local/bin/olcpanel.bak`. При обновлении также пересобирается upstream
+`olcrtc`; предыдущий бинарник сохраняется как `/usr/local/bin/olcrtc.bak` и
+откатывается вместе с панелью, если миграция, restart или health-check не
+прошли.
+
+Для обновления `olcrtc` используются те же переменные:
+
+```bash
+OLCRTC_REF=master OLCRTC_NO_CACHE=1 bash <(curl -Ls https://raw.githubusercontent.com/poprockstar/olcrtc-panel/master/update.sh)
+```
 
 ## Где лежат файлы
 
 - бинарник: `/usr/local/bin/olcpanel`;
+- бинарник `olcrtc`: `/usr/local/bin/olcrtc`;
 - настройки сервиса: `/etc/default/olcpanel`;
 - база SQLite: `/etc/olcpanel/panel.db`;
 - runtime-конфиги `olcrtc`: `/var/lib/olcpanel/runtime`;
+- исходники `olcrtc`: `/var/lib/olcpanel/olcrtc-src`;
+- кеш сборки `olcrtc`: `/var/cache/olcpanel/olcrtc`;
 - резервные копии: `/var/lib/olcpanel/backups`;
 - логи панели: `/var/log/olcpanel/panel.log`;
 - systemd unit: `/etc/systemd/system/olcpanel.service`.
