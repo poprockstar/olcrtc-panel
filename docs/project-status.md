@@ -13,7 +13,7 @@ Last updated: 2026-05-29
 
 ## Phase State
 
-- Current phase: Phase 13 - Installer, Updater, Systemd, Docker complete; Phase 14 - Hardening And Release Candidate is next.
+- Current phase: Phase 14 - Hardening And Release Candidate validation is in progress. Local and static gates passed; clean Debian/Ubuntu root install, update, rollback, and Linux netstack e2e validation remain required before RC completion.
 - Completed phases:
   - Phase 0 - Architecture Approval And Project Tracking
   - Phase 1 - Repository Skeleton And Build Pipeline
@@ -29,7 +29,7 @@ Last updated: 2026-05-29
   - Phase 11 - Frontend Operational UI
   - Phase 12 - Backup, Restore, Import, Export
   - Phase 13 - Installer, Updater, Systemd, Docker
-- Next session target: start Phase 14 hardening and release-candidate validation.
+- Next session target: run Phase 14 on a clean Debian/Ubuntu amd64 root VPS and complete install, update, rollback, systemd, `/api/v1/state`, and `go test -tags root_e2e ./internal/netstack` validation.
 
 ## Implemented Capabilities
 
@@ -333,6 +333,19 @@ Last updated: 2026-05-29
 - `go mod tidy` raised the module directive from `go 1.23.0` to `go 1.25.0` for the selected `modernc.org/sqlite v1.50.1` dependency set.
 - TypeScript 6 required adding `frontend/src/vite-env.d.ts` for Vite's CSS module declarations.
 
+## Phase 14 RC Validation Notes
+
+- Phase 14 validation record created at `docs/development/phase14-release-candidate.md`.
+- No API, schema, CLI, or UI behavior changes were made during this pass.
+- Local Go, frontend, build, Linux cross-build, and shell syntax gates passed.
+- Installer and updater static review confirmed `/etc/default/olcpanel` stores deployment configuration only, not generated secrets.
+- Runtime config review confirmed secret-bearing `server.yaml` files are written through the private `0600` path in `internal/runtimeconfig`.
+- Path review confirmed the documented defaults remain `/etc/olcpanel/panel.db`, `/var/lib/olcpanel/runtime`, `/var/lib/olcpanel/backups`, and `/var/log/olcpanel/panel.log`.
+- Bind review confirmed local/manual defaults remain `127.0.0.1:8888`; installer deployments intentionally write `0.0.0.0:PORT`.
+- Route review confirmed private `/sub/{token}` remains the default sharing route, while `/c/{client_id}` remains disabled by default and UI-gated by `public_client_endpoint_enabled`.
+- Multi-node review confirmed v1 remains local-node only; schema/backend `node_id` reservations are present, but no unfinished multi-node operator controls were found in `frontend/src`.
+- Required clean Linux/root install, update, rollback, and real netstack root-e2e validation were not run because no clean Debian/Ubuntu amd64 root VPS was available in this workspace.
+
 ## Test Status
 
 - Phase 0: documentation-only; no automated tests required.
@@ -434,6 +447,17 @@ Last updated: 2026-05-29
   - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
   - `GOOS=linux GOARCH=amd64 go build -o bin/olcpanel-linux-amd64 ./cmd/olcpanel` passed.
   - `bash -n install.sh` and `bash -n update.sh` could not run because this Windows environment routes `bash` through a missing WSL binary.
+- Phase 14 RC validation:
+  - `go test ./...` passed.
+  - `npm --prefix frontend run test` passed with 2 test files and 13 Vitest/Testing Library tests.
+  - `npm --prefix frontend run build` passed and rebuilt embedded assets.
+  - `go build -o bin/olcpanel ./cmd/olcpanel` passed.
+  - `GOOS=linux GOARCH=amd64 go build -o bin\olcpanel-linux-amd64 .\cmd\olcpanel` passed.
+  - `C:\Program Files\Git\bin\bash.exe -n install.sh` passed.
+  - `C:\Program Files\Git\bin\bash.exe -n update.sh` passed.
+  - `go test -tags root_e2e ./internal/netstack` passed on Windows, but this does not execute the Linux-only root-e2e test file because that file is guarded by `linux && root_e2e`.
+  - `go test -tags root_e2e ./internal/netstack` on Linux as root was not run; no clean Debian/Ubuntu amd64 root VPS was available in this workspace.
+  - Clean install smoke, update smoke, `systemctl status olcpanel --no-pager`, `curl -fsS http://127.0.0.1:8888/api/v1/state`, and rollback drill were not run; they remain Phase 14 RC blockers.
 
 ## Open Risks And Blockers
 
@@ -444,8 +468,8 @@ Last updated: 2026-05-29
 - Standalone CLI reload remains pending daemon IPC or HTTP-client design.
 - Public `/c/{client_id}` intentionally exposes stable client IDs when enabled; the private `/sub/{token}` endpoint remains the default safer sharing path.
 - Upstream OlcRTC documentation currently names the Jitsi-like transport carrier as `jazz`; Phase 4 preserves the planned public API enum `jitsi` while using the same stable/unstable transport matrix.
-- Current verification ran from Windows, but production netns/veth/tc behavior must be verified in an isolated Linux environment with `go test -tags root_e2e ./internal/netstack`.
-- One-line install/update scripts have static and build coverage from Windows, but a clean Debian/Ubuntu root install and update rollback drill remain required before a public release announcement.
+- Current Phase 14 verification ran from Windows. Production netns/veth/tc behavior still must be verified in an isolated Linux environment with `go test -tags root_e2e ./internal/netstack` as root.
+- One-line install/update scripts now have Git Bash syntax coverage and local build coverage, but a clean Debian/Ubuntu root install, update, and rollback drill remain required before RC completion or any public release announcement.
 - `olcpanel doctor` detects stale OlcPanel namespaces/veths and required command/sysctl state, but deeper NAT/tc drift reporting may need additional hardening during Linux deployment validation.
 - Traffic accounting depends on Linux sysfs veth statistics at runtime; Windows verification covers the reader with a temporary sysfs-shaped fixture, not real kernel counters.
 - Host metrics are snapshot-only and intentionally not retained historically; long-term charts or Prometheus-style scraping remain future work.
